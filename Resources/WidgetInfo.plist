@@ -3,21 +3,37 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <string>zh-Hans</string>
     <key>CFBundleDisplayName</key>
     <string>Codex 额度</string>
     <key>CFBundleExecutable</key>
     <string>CodexQuotaWidget</string>
     <key>CFBundleIdentifier</key>
     <string>com.codexquotabar.app.widget</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleName</key>
     <string>CodexQuotaWidget</string>
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>DTCompiler</key>
+    <string>com.apple.compilers.llvm.clang.1_0</string>
+    <key>DTPlatformName</key>
+    <string>macosx</string>
+    <key>DTSDKName</key>
+    <string>macosx26.4</string>
+    <key>DTXcode</key>
+    <string>2600</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
     <key>NSExtension</key>
     <dict>
         <key>NSExtensionPointIdentifier</key>

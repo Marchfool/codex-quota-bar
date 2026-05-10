@@ -75,7 +75,18 @@ open /Applications/CodexQuotaBar.app
 
 ## Desktop widget
 
-CodexQuotaBar includes a WidgetKit desktop widget.
+CodexQuotaBar includes two desktop-widget paths:
+
+- A built-in floating desktop widget that works from the menu bar app. Open the popover and click `桌面`.
+- An experimental WidgetKit extension bundled in the app. This may require a properly signed Xcode/Developer ID build before macOS lists it in the system widget gallery.
+
+For the floating widget:
+
+1. Launch CodexQuotaBar.
+2. Open the status bar popover.
+3. Click `桌面` to show or hide the desktop widget.
+
+For the WidgetKit widget:
 
 1. Install `CodexQuotaBar.app` into `/Applications`.
 2. Launch the app once so it can write the latest quota snapshot.

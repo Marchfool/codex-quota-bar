@@ -65,7 +65,18 @@ open /Applications/CodexQuotaBar.app
 
 ## 桌面组件
 
-CodexQuotaBar 内置了 macOS WidgetKit 桌面组件。
+CodexQuotaBar 提供两种桌面组件方式：
+
+- 内置悬浮桌面组件：从状态栏下拉面板点击 `桌面` 即可显示或隐藏，当前 DMG 可直接使用。
+- 实验性 WidgetKit 系统组件：已打包进 App，但 macOS 可能要求 Xcode/Developer ID 正式签名后才会显示在系统组件库里。
+
+悬浮桌面组件：
+
+1. 启动 CodexQuotaBar。
+2. 打开状态栏下拉面板。
+3. 点击 `桌面` 显示或隐藏桌面组件。
+
+WidgetKit 系统组件：
 
 1. 将 `CodexQuotaBar.app` 安装到 `/Applications`。
 2. 启动一次应用，让它写入最新额度快照。

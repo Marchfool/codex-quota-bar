@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var manager: QuotaManager!
     private var accountsWindow: NSWindow?
+    private var desktopWidgetWindow: NSPanel?
     private let popover = NSPopover()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 refresh: { [weak self] in self?.refreshNow() },
                 importAccount: { [weak self] in self?.importAccount() },
                 showAccounts: { [weak self] in self?.showAccounts() },
+                toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
                 openDataFolder: { [weak self] in self?.openLogs() },
                 quit: { [weak self] in self?.quit() }
             )
@@ -133,6 +135,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc private func toggleDesktopWidget() {
+        if let window = desktopWidgetWindow, window.isVisible {
+            window.orderOut(nil)
+            UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+            return
+        }
+
+        if desktopWidgetWindow == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 232, height: 128),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+            panel.isMovableByWindowBackground = true
+            panel.contentView = NSHostingView(rootView: FloatingDesktopWidgetView(manager: manager))
+            desktopWidgetWindow = panel
+        }
+
+        if let screenFrame = NSScreen.main?.visibleFrame {
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 252, y: screenFrame.maxY - 158))
+        }
+        desktopWidgetWindow?.orderFrontRegardless()
+        UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
+    }
+
     @objc private func openLogs() {
         NSWorkspace.shared.open(FileSlotStore().fileURL.deletingLastPathComponent())
     }
@@ -152,6 +185,7 @@ private struct MonitorPanelView: View {
     let refresh: () -> Void
     let importAccount: () -> Void
     let showAccounts: () -> Void
+    let toggleDesktopWidget: () -> Void
     let openDataFolder: () -> Void
     let quit: () -> Void
 
@@ -249,6 +283,7 @@ private struct MonitorPanelView: View {
                 .disabled(manager.isRefreshing)
             IconButton(title: "导入", systemImage: "person.crop.circle.badge.plus", action: importAccount)
             IconButton(title: "账号", systemImage: "person.2", action: showAccounts)
+            IconButton(title: "桌面", systemImage: "rectangle.on.rectangle", action: toggleDesktopWidget)
             IconButton(title: "数据", systemImage: "folder", action: openDataFolder)
             Spacer()
             Button(action: quit) {
@@ -325,6 +360,88 @@ private struct SlotDashboardCard: View {
         let plan = slot.lastSnapshot?.extras["planType"].map { "套餐 \($0)" }
         let source = slot.lastSnapshot?.sourceLabel
         return [plan, source].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+private struct FloatingDesktopWidgetView: View {
+    @ObservedObject var manager: QuotaManager
+
+    var body: some View {
+        ZStack {
+            VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.46),
+                    Color(red: 0.03, green: 0.06, blue: 0.10).opacity(0.72)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Codex 额度", systemImage: "terminal.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+                    Spacer()
+                    Text(manager.compactStatusBarTitle)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.64))
+                }
+
+                HStack(spacing: 10) {
+                    FloatingMetric(title: "5h", value: metric(.session), color: .green)
+                    FloatingMetric(title: "W", value: metric(.weekly), color: .cyan)
+                }
+
+                Text(updatedText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.44))
+            }
+            .padding(12)
+        }
+        .frame(width: 232, height: 128)
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.14), lineWidth: 0.8))
+        .preferredColorScheme(.dark)
+    }
+
+    private func metric(_ kind: QuotaWindowKind) -> Int? {
+        manager.slots.compactMap(\.lastSnapshot).flatMap(\.quotaWindows).first(where: { $0.kind == kind })?.remainingPercent
+    }
+
+    private var updatedText: String {
+        guard let updatedAt = manager.slots.compactMap(\.lastSnapshot).first?.updatedAt else {
+            return "尚无快照"
+        }
+        return QuotaFormatters.updatedText(updatedAt).replacingOccurrences(of: "updated ", with: "更新 ")
+    }
+}
+
+private struct FloatingMetric: View {
+    let title: String
+    let value: Int?
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                Spacer()
+                Text(value.map { "\($0)%" } ?? "--")
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(color)
+            }
+            ProgressView(value: Double(value ?? 0), total: 100)
+                .tint(color)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12), lineWidth: 0.7))
     }
 }
 
