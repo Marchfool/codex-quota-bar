@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 288, height: 238),
+                contentRect: NSRect(x: 0, y: 0, width: 430, height: 174),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -212,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 308, y: screenFrame.maxY - 268))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 450, y: screenFrame.maxY - 204))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -726,45 +726,19 @@ private struct FloatingDesktopWidgetView: View {
                 endPoint: .bottomTrailing
             )
 
-            VStack(alignment: .leading, spacing: 9) {
-                HStack {
-                    Label("Codex", systemImage: "terminal.fill")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.88))
-                    Spacer()
-                    Text(manager.compactStatusBarTitle)
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.48))
-                }
-
-                HStack(spacing: 8) {
-                    FloatingMetric(title: "5h", value: metric(.session), color: .green)
-                    FloatingMetric(title: "周", value: metric(.weekly), color: .cyan)
-                }
-
-                Divider()
-                    .overlay(.white.opacity(0.10))
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Label("模型", systemImage: "chart.bar.xaxis")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
-                        Spacer()
-                        Text(updatedText)
-                            .font(.system(size: 8.5, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.30))
-                    }
-                    ForEach(apiKeyManager.providers) { provider in
-                        FloatingAPIProviderRow(provider: provider)
-                    }
-                }
+            HStack(spacing: 22) {
+                FloatingGauge(title: "5h", value: metric(.session), systemImage: "terminal.fill", color: .green)
+                FloatingGauge(title: "周", value: metric(.weekly), systemImage: "calendar", color: .cyan)
+                FloatingGauge(title: "DS", value: apiRemaining(.deepseek), systemImage: "sparkle.magnifyingglass", color: Color(hex: APIKeyProviderID.deepseek.colorHex) ?? .blue)
+                FloatingGauge(title: "MM", value: apiRemaining(.minimax), systemImage: "brain.head.profile", color: Color(hex: APIKeyProviderID.minimax.colorHex) ?? .purple)
+                FloatingGauge(title: "CF", value: apiRemaining(.comfly), systemImage: "bolt.fill", color: Color(hex: APIKeyProviderID.comfly.colorHex) ?? .orange)
             }
-            .padding(12)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 20)
         }
-        .frame(width: 288, height: 238)
-        .clipShape(RoundedRectangle(cornerRadius: 17))
-        .overlay(RoundedRectangle(cornerRadius: 17).stroke(.white.opacity(0.14), lineWidth: 0.8))
+        .frame(width: 430, height: 174)
+        .clipShape(RoundedRectangle(cornerRadius: 26))
+        .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.24), lineWidth: 1.1))
         .preferredColorScheme(.dark)
     }
 
@@ -772,142 +746,61 @@ private struct FloatingDesktopWidgetView: View {
         manager.slots.compactMap(\.lastSnapshot).flatMap(\.quotaWindows).first(where: { $0.kind == kind })?.remainingPercent
     }
 
-    private var updatedText: String {
-        guard let updatedAt = manager.slots.compactMap(\.lastSnapshot).first?.updatedAt else {
-            return "尚无快照"
-        }
-        return QuotaFormatters.updatedText(updatedAt).replacingOccurrences(of: "updated ", with: "更新 ")
-    }
-}
+    private func apiRemaining(_ providerID: APIKeyProviderID) -> Int? {
+        guard let provider = apiKeyManager.providers.first(where: { $0.id == providerID }),
+              let snapshot = provider.lastSnapshot
+        else { return nil }
 
-private struct FloatingAPIProviderRow: View {
-    let provider: APIKeyProviderConfig
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text(shortName)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.74))
-                .frame(width: 42, alignment: .leading)
-            VStack(spacing: 3) {
-                if provider.id == .minimax {
-                    FloatingMiniMeter(label: "5h", remainingPercent: minimaxIntervalRemaining, color: color)
-                    FloatingMiniMeter(label: "周", remainingPercent: minimaxWeeklyRemaining, color: color.opacity(0.88))
-                } else {
-                    FloatingMiniMeter(label: nil, remainingPercent: remainingPercent, color: color)
-                }
-            }
-            Spacer(minLength: 4)
-            Text(percentText)
-                .font(.system(size: 11.5, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
-                .frame(width: 58, alignment: .trailing)
-        }
-    }
-
-    private var shortName: String {
-        switch provider.id {
-        case .deepseek: return "DS"
-        case .minimax: return "MM"
-        case .comfly: return "CF"
-        }
-    }
-
-    private var percentText: String {
-        provider.id == .minimax ? "\(minimaxIntervalRemaining)%/\(minimaxWeeklyRemaining)%" : "\(remainingPercent)%"
-    }
-
-    private var color: Color {
-        Color(hex: provider.colorHex) ?? .white.opacity(0.7)
-    }
-
-    private var updatedText: String {
-        guard let updatedAt = provider.lastSnapshot?.updatedAt else { return "未更新" }
-        return QuotaFormatters.updatedText(updatedAt)
-    }
-
-    private var remainingPercent: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        switch provider.id {
+        switch providerID {
         case .deepseek:
             return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
         case .minimax:
-            return minimaxIntervalRemaining
+            return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
         case .comfly:
             return max(0, 100 - snapshot.usedPercent)
         }
     }
-
-    private var minimaxIntervalRemaining: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
-    }
-
-    private var minimaxWeeklyRemaining: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
-    }
 }
 
-private struct FloatingMiniMeter: View {
-    let label: String?
-    let remainingPercent: Int
-    let color: Color
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if let label {
-                Text(label)
-                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.34))
-                    .frame(width: 18, alignment: .leading)
-            }
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.white.opacity(0.10))
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(color.opacity(0.86))
-                        .frame(width: proxy.size.width * CGFloat(max(0, min(100, remainingPercent))) / 100)
-                }
-            }
-            .frame(height: 4)
-        }
-        .frame(height: 7)
-    }
-}
-
-private struct FloatingMetric: View {
+private struct FloatingGauge: View {
     let title: String
     let value: Int?
+    let systemImage: String
     let color: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
-                Spacer()
-                Text(value.map { "\($0)%" } ?? "--")
-                    .font(.system(size: 19, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(color)
+        VStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .stroke(.white.opacity(0.10), lineWidth: 9)
+                Circle()
+                    .trim(from: 0, to: CGFloat(clampedValue) / 100)
+                    .stroke(
+                        color,
+                        style: StrokeStyle(lineWidth: 9, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: systemImage)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.78))
             }
-            ProgressView(value: Double(value ?? 0), total: 100)
-                .tint(color)
-                .scaleEffect(y: 0.55, anchor: .center)
+            .frame(width: 62, height: 62)
+
+            VStack(spacing: 1) {
+                Text(value.map { "\($0)%" } ?? "--")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.86))
+                Text(title)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.40))
+            }
         }
-        .padding(9)
-        .frame(maxWidth: .infinity)
-        .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.11), lineWidth: 0.7))
+        .frame(width: 62)
+    }
+
+    private var clampedValue: Int {
+        max(0, min(100, value ?? 0))
     }
 }
 
