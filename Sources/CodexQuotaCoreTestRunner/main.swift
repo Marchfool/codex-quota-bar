@@ -9,6 +9,7 @@ struct TestRunner {
         try providerDecodesWhamUsageSchema()
         try llmBalanceProviderDecodesSamples()
         formattersClampPercent()
+        formattersUseReadableChineseUpdatedText()
         await lowestRemainingUsesTightestAccount()
         await statusBarPrefersSessionWindow()
         await refreshFailureKeepsStaleSnapshot()
@@ -121,6 +122,15 @@ struct TestRunner {
         expect(QuotaFormatters.percentText(-10) == "0%", "negative percentages should clamp")
         expect(QuotaFormatters.percentText(110) == "100%", "over-limit percentages should clamp")
         expect(QuotaFormatters.percentText(42) == "42%", "normal percentages should pass through")
+    }
+
+    static func formattersUseReadableChineseUpdatedText() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        expect(QuotaFormatters.updatedText(now, now: now) == "刚刚更新", "fresh updates should read naturally")
+        expect(
+            QuotaFormatters.updatedText(Date(timeIntervalSince1970: 940), now: now) == "更新于 1 分钟前",
+            "minute-old updates should use Chinese before phrasing"
+        )
     }
 
     static func llmBalanceProviderDecodesSamples() throws {

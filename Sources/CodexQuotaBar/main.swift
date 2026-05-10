@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 352, height: 560)
+        updatePopoverSize()
         let hostingController = NSHostingController(
             rootView: MonitorPanelView(
                 manager: manager,
@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await manager.refreshAll()
             await apiKeyManager.refreshAll()
             WidgetCenter.shared.reloadAllTimelines()
+            updatePopoverSize()
             configureStatusButton()
         }
         manager.startPolling()
@@ -65,8 +66,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.configureStatusButton()
+                self?.updatePopoverSize()
             }
         }
+    }
+
+    private func updatePopoverSize() {
+        popover.contentSize = NSSize(
+            width: PanelMetrics.width,
+            height: PanelMetrics.height(
+                codexSlotCount: manager.slots.count,
+                apiProviderCount: apiKeyManager.providers.count,
+                hasError: manager.lastError != nil || apiKeyManager.lastError != nil
+            )
+        )
     }
 
     private func configureStatusButton() {
@@ -104,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            updatePopoverSize()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.isOpaque = false
             popover.contentViewController?.view.window?.backgroundColor = .clear
@@ -116,6 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await manager.refreshAll()
             await apiKeyManager.refreshAll()
             WidgetCenter.shared.reloadAllTimelines()
+            updatePopoverSize()
             configureStatusButton()
         }
     }
@@ -123,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refreshAPIKeys() {
         Task {
             await apiKeyManager.refreshAll()
+            updatePopoverSize()
         }
     }
 
@@ -228,6 +244,14 @@ private struct MonitorPanelView: View {
     let openDataFolder: () -> Void
     let quit: () -> Void
 
+    private var panelHeight: CGFloat {
+        PanelMetrics.height(
+            codexSlotCount: manager.slots.count,
+            apiProviderCount: apiKeyManager.providers.count,
+            hasError: manager.lastError != nil || apiKeyManager.lastError != nil
+        )
+    }
+
     var body: some View {
         ZStack {
             VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
@@ -262,12 +286,12 @@ private struct MonitorPanelView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                 }
-                .frame(maxHeight: 458)
+                .frame(maxHeight: PanelMetrics.scrollHeight(for: panelHeight))
 
                 actionBar
             }
         }
-        .frame(width: 352, height: 560)
+        .frame(width: PanelMetrics.width, height: panelHeight)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .preferredColorScheme(.dark)
     }
@@ -342,6 +366,25 @@ private struct MonitorPanelView: View {
         .padding(.top, 7)
         .padding(.bottom, 9)
         .background(.black.opacity(0.16))
+    }
+}
+
+private enum PanelMetrics {
+    static let width: CGFloat = 352
+    static let minHeight: CGFloat = 390
+    static let maxHeight: CGFloat = 640
+    private static let chromeHeight: CGFloat = 102
+
+    static func height(codexSlotCount: Int, apiProviderCount: Int, hasError: Bool) -> CGFloat {
+        let codexHeight: CGFloat = codexSlotCount == 0 ? 150 : CGFloat(codexSlotCount) * 190
+        let apiHeight: CGFloat = 62 + CGFloat(apiProviderCount) * 54
+        let errorHeight: CGFloat = hasError ? 42 : 0
+        let contentHeight = codexHeight + apiHeight + errorHeight + 24
+        return min(maxHeight, max(minHeight, chromeHeight + contentHeight))
+    }
+
+    static func scrollHeight(for panelHeight: CGFloat) -> CGFloat {
+        max(220, panelHeight - chromeHeight)
     }
 }
 
