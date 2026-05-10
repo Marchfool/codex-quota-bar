@@ -4,6 +4,7 @@ import Foundation
 public final class APIKeyManager: ObservableObject {
     @Published public private(set) var providers: [APIKeyProviderConfig] = []
     @Published public private(set) var isRefreshing = false
+    @Published public private(set) var refreshingProviderIDs: Set<APIKeyProviderID> = []
     @Published public private(set) var lastError: String?
 
     public let store: APIKeyConfigStore
@@ -86,18 +87,27 @@ public final class APIKeyManager: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
-        for index in providers.indices where providers[index].isEnabled {
-            do {
-                let credentials = credentials(for: providers[index])
-                guard hasRequiredCredentials(providers[index], credentials: credentials) else {
-                    continue
-                }
-                let snapshot = try await balanceProvider.fetchBalance(for: providers[index], credentials: credentials)
-                providers[index].lastSnapshot = snapshot
-            } catch {
-                providers[index].lastSnapshot = staleSnapshot(from: providers[index].lastSnapshot, error: error)
-                lastError = "\(providers[index].displayName): \(error.localizedDescription)"
+        for provider in providers where provider.isEnabled {
+            await refreshProvider(provider.id)
+        }
+        persist()
+    }
+
+    public func refreshProvider(_ providerID: APIKeyProviderID) async {
+        guard let index = providers.firstIndex(where: { $0.id == providerID }), providers[index].isEnabled else { return }
+        refreshingProviderIDs.insert(providerID)
+        defer { refreshingProviderIDs.remove(providerID) }
+
+        do {
+            let credentials = credentials(for: providers[index])
+            guard hasRequiredCredentials(providers[index], credentials: credentials) else {
+                return
             }
+            let snapshot = try await balanceProvider.fetchBalance(for: providers[index], credentials: credentials)
+            providers[index].lastSnapshot = snapshot
+        } catch {
+            providers[index].lastSnapshot = staleSnapshot(from: providers[index].lastSnapshot, error: error)
+            lastError = "\(providers[index].displayName): \(error.localizedDescription)"
         }
         persist()
     }

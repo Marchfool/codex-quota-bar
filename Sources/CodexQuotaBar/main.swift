@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 232, height: 128),
+                contentRect: NSRect(x: 0, y: 0, width: 256, height: 256),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -207,12 +207,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.level = .floating
             panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
             panel.isMovableByWindowBackground = true
-            panel.contentView = NSHostingView(rootView: FloatingDesktopWidgetView(manager: manager))
+            panel.contentView = NSHostingView(rootView: FloatingDesktopWidgetView(manager: manager, apiKeyManager: apiKeyManager))
             desktopWidgetWindow = panel
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 252, y: screenFrame.maxY - 158))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 276, y: screenFrame.maxY - 286))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -377,7 +377,7 @@ private enum PanelMetrics {
 
     static func height(codexSlotCount: Int, apiProviderCount: Int, hasError: Bool) -> CGFloat {
         let codexHeight: CGFloat = codexSlotCount == 0 ? 170 : CGFloat(codexSlotCount) * 215
-        let apiHeight: CGFloat = 74 + CGFloat(apiProviderCount) * 74
+        let apiHeight: CGFloat = 74 + CGFloat(apiProviderCount) * 86
         let errorHeight: CGFloat = hasError ? 52 : 0
         let contentHeight = codexHeight + apiHeight + errorHeight + 36
         return min(maxHeight, max(minHeight, chromeHeight + contentHeight))
@@ -457,14 +457,9 @@ private struct APIBalanceSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("模型余额", systemImage: "chart.bar.xaxis")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.82))
-                    Text(updatedText)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.40))
-                }
+                Label("模型余额", systemImage: "chart.bar.xaxis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
                 Spacer()
                 Button(action: refresh) {
                     Image(systemName: "arrow.clockwise")
@@ -487,7 +482,13 @@ private struct APIBalanceSection: View {
                     APIBalanceRow(
                         provider: provider,
                         isCopied: copiedProviderID == provider.id,
-                        copy: { copyPrimaryKey(for: provider) }
+                        isRefreshing: manager.refreshingProviderIDs.contains(provider.id),
+                        copy: { copyPrimaryKey(for: provider) },
+                        refresh: {
+                            Task {
+                                await manager.refreshProvider(provider.id)
+                            }
+                        }
                     )
                 }
             }
@@ -516,20 +517,17 @@ private struct APIBalanceSection: View {
         copiedProviderID = provider.id
     }
 
-    private var updatedText: String {
-        let dates = manager.providers.compactMap(\.lastSnapshot?.updatedAt)
-        guard let latest = dates.max() else { return "尚未更新" }
-        return QuotaFormatters.updatedText(latest).replacingOccurrences(of: "updated ", with: "更新 ")
-    }
 }
 
 private struct APIBalanceRow: View {
     let provider: APIKeyProviderConfig
     let isCopied: Bool
+    let isRefreshing: Bool
     let copy: () -> Void
+    let refresh: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Circle()
                     .fill(color)
@@ -545,9 +543,17 @@ private struct APIBalanceRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                 Spacer()
-                Text(statusText)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.50))
+                PercentPill(text: statusText, color: color, isError: provider.lastSnapshot?.status == .error)
+                Button(action: refresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(isRefreshing ? 0.36 : 0.62))
+                        .frame(width: 22, height: 20)
+                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.borderless)
+                .disabled(isRefreshing)
+                .help("刷新 \(provider.displayName)")
                 Button(action: copy) {
                     Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 10.5, weight: .semibold))
@@ -564,6 +570,11 @@ private struct APIBalanceRow: View {
             Text(detailText)
                 .font(.system(size: 10))
                 .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
+
+            Text(updatedText)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.34))
                 .lineLimit(1)
         }
     }
@@ -600,7 +611,12 @@ private struct APIBalanceRow: View {
 
     private var statusText: String {
         guard let snapshot = provider.lastSnapshot else { return "--" }
-        return "剩余 \(remainingPercent)%"
+        return "\(remainingPercent)%"
+    }
+
+    private var updatedText: String {
+        guard let updatedAt = provider.lastSnapshot?.updatedAt else { return "尚未更新" }
+        return QuotaFormatters.updatedText(updatedAt)
     }
 
     private var detailText: String {
@@ -677,8 +693,26 @@ private struct APIUsageMeter: View {
     }
 }
 
+private struct PercentPill: View {
+    let text: String
+    let color: Color
+    let isError: Bool
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(isError ? .orange : color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background((isError ? Color.orange : color).opacity(0.16), in: Capsule())
+            .overlay(Capsule().stroke((isError ? Color.orange : color).opacity(0.22), lineWidth: 0.7))
+    }
+}
+
 private struct FloatingDesktopWidgetView: View {
     @ObservedObject var manager: QuotaManager
+    @ObservedObject var apiKeyManager: APIKeyManager
 
     var body: some View {
         ZStack {
@@ -711,10 +745,22 @@ private struct FloatingDesktopWidgetView: View {
                 Text(updatedText)
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.44))
+
+                Divider()
+                    .overlay(.white.opacity(0.10))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("模型余额", systemImage: "chart.bar.xaxis")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                    ForEach(apiKeyManager.providers) { provider in
+                        FloatingAPIProviderRow(provider: provider)
+                    }
+                }
             }
             .padding(12)
         }
-        .frame(width: 232, height: 128)
+        .frame(width: 256, height: 256)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.14), lineWidth: 0.8))
         .preferredColorScheme(.dark)
@@ -729,6 +775,70 @@ private struct FloatingDesktopWidgetView: View {
             return "尚无快照"
         }
         return QuotaFormatters.updatedText(updatedAt).replacingOccurrences(of: "updated ", with: "更新 ")
+    }
+}
+
+private struct FloatingAPIProviderRow: View {
+    let provider: APIKeyProviderConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 6, height: 6)
+                Text(provider.displayName)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.76))
+                Spacer()
+                Text("\(remainingPercent)%")
+                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(color)
+                Text(updatedText)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.34))
+                    .lineLimit(1)
+            }
+
+            if provider.id == .minimax {
+                APIUsageMeter(label: "5h", remainingPercent: minimaxIntervalRemaining, color: color)
+                APIUsageMeter(label: "周", remainingPercent: minimaxWeeklyRemaining, color: color.opacity(0.88))
+            } else {
+                APIUsageMeter(label: nil, remainingPercent: remainingPercent, color: color)
+            }
+        }
+    }
+
+    private var color: Color {
+        Color(hex: provider.colorHex) ?? .white.opacity(0.7)
+    }
+
+    private var updatedText: String {
+        guard let updatedAt = provider.lastSnapshot?.updatedAt else { return "未更新" }
+        return QuotaFormatters.updatedText(updatedAt)
+    }
+
+    private var remainingPercent: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        switch provider.id {
+        case .deepseek:
+            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        case .minimax:
+            return minimaxIntervalRemaining
+        case .comfly:
+            return max(0, 100 - snapshot.usedPercent)
+        }
+    }
+
+    private var minimaxIntervalRemaining: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+    }
+
+    private var minimaxWeeklyRemaining: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
     }
 }
 
