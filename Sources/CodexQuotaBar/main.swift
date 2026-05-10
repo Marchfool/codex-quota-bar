@@ -720,8 +720,8 @@ private struct FloatingDesktopWidgetView: View {
             VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
             LinearGradient(
                 colors: [
-                    Color.black.opacity(0.50),
-                    Color(red: 0.025, green: 0.035, blue: 0.045).opacity(0.78)
+                    Color(red: 0.11, green: 0.11, blue: 0.12).opacity(0.82),
+                    Color(red: 0.07, green: 0.075, blue: 0.085).opacity(0.88)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -775,7 +775,7 @@ private struct FloatingDesktopWidgetView: View {
         }
         .frame(width: 340, height: 340)
         .clipShape(RoundedRectangle(cornerRadius: 28))
-        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.18), lineWidth: 1.0))
+        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.22), lineWidth: 1.0))
         .preferredColorScheme(.dark)
     }
 
@@ -842,8 +842,8 @@ private struct FloatingBarCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity)
-        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.08), lineWidth: 0.8))
+        .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.10), lineWidth: 0.8))
     }
 }
 
@@ -930,7 +930,7 @@ private struct FloatingProgressBar: View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: height / 2)
-                    .fill(.white.opacity(0.075))
+                    .fill(.white.opacity(0.105))
                 RoundedRectangle(cornerRadius: height / 2)
                     .fill(color.opacity(0.92))
                     .frame(width: proxy.size.width * CGFloat(clampedValue) / 100)
