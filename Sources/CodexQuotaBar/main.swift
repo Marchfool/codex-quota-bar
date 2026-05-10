@@ -610,7 +610,7 @@ private struct APIBalanceRow: View {
     }
 
     private var statusText: String {
-        guard let snapshot = provider.lastSnapshot else { return "--" }
+        guard provider.lastSnapshot != nil else { return "--" }
         return "\(remainingPercent)%"
     }
 
@@ -713,6 +713,7 @@ private struct PercentPill: View {
 private struct FloatingDesktopWidgetView: View {
     @ObservedObject var manager: QuotaManager
     @ObservedObject var apiKeyManager: APIKeyManager
+    @State private var copiedProviderID: APIKeyProviderID?
 
     var body: some View {
         ZStack {
@@ -726,7 +727,7 @@ private struct FloatingDesktopWidgetView: View {
                 endPoint: .bottomTrailing
             )
 
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Label("Codex 额度", systemImage: "terminal.fill")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
@@ -738,23 +739,35 @@ private struct FloatingDesktopWidgetView: View {
                 }
 
                 HStack(spacing: 12) {
-                    FloatingBarCard(title: "5 小时", value: metric(.session), color: .green)
-                    FloatingBarCard(title: "周额度", value: metric(.weekly), color: .cyan)
+                    FloatingBarCard(title: "5 小时", value: metric(.session))
+                    FloatingBarCard(title: "周额度", value: metric(.weekly))
                 }
 
                 Divider()
                     .overlay(.white.opacity(0.12))
 
-                VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Label("模型余额", systemImage: "chart.bar.xaxis")
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                             .foregroundStyle(.white.opacity(0.72))
                         Spacer()
                     }
-                    FloatingModelBar(title: "DeepSeek", value: apiRemaining(.deepseek), color: Color(hex: APIKeyProviderID.deepseek.colorHex) ?? .blue)
-                    FloatingModelBar(title: "MiniMax 5h", value: apiRemaining(.minimax), secondaryTitle: "周", secondaryValue: apiWeeklyRemaining(.minimax), color: Color(hex: APIKeyProviderID.minimax.colorHex) ?? .purple)
-                    FloatingModelBar(title: "Comfly", value: apiRemaining(.comfly), color: Color(hex: APIKeyProviderID.comfly.colorHex) ?? .orange)
+                    FloatingModelBar(title: "DeepSeek", value: apiRemaining(.deepseek))
+                    FloatingModelBar(title: "MiniMax", value: apiRemaining(.minimax), secondaryTitle: "周额度", secondaryValue: apiWeeklyRemaining(.minimax))
+                    FloatingModelBar(title: "Comfly", value: apiRemaining(.comfly))
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 8) {
+                    ForEach(apiKeyManager.providers) { provider in
+                        FloatingCopyButton(
+                            title: provider.shortCopyTitle,
+                            isCopied: copiedProviderID == provider.id,
+                            action: { copyKey(provider.id) }
+                        )
+                    }
                 }
             }
             .padding(18)
@@ -798,12 +811,20 @@ private struct FloatingDesktopWidgetView: View {
         else { return nil }
         return Int(snapshot.extras["weeklyRemainingPercent"] ?? "")
     }
+
+    private func copyKey(_ providerID: APIKeyProviderID) {
+        let value = apiKeyManager.primaryCopyValue(providerID: providerID)
+        guard !value.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        copiedProviderID = providerID
+    }
 }
 
 private struct FloatingBarCard: View {
     let title: String
     let value: Int?
-    let color: Color
+    var color: Color { quotaColor(value) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
@@ -831,23 +852,22 @@ private struct FloatingModelBar: View {
     let value: Int?
     var secondaryTitle: String?
     var secondaryValue: Int?
-    let color: Color
 
     var body: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 6) {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(color)
+                    .fill(quotaColor(value))
                     .frame(width: 8, height: 8)
                 Text(title)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.80))
                     .frame(width: 82, alignment: .leading)
-                FloatingProgressBar(value: value, color: color, height: 7)
+                FloatingProgressBar(value: value, color: quotaColor(value), height: 7)
                 Text(value.map { "\($0)%" } ?? "--")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(color)
+                    .foregroundStyle(quotaColor(value))
                     .frame(width: 42, alignment: .trailing)
             }
 
@@ -858,16 +878,47 @@ private struct FloatingModelBar: View {
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.40))
                         .frame(width: 82, alignment: .leading)
-                    FloatingProgressBar(value: secondaryValue, color: color.opacity(0.72), height: 5)
+                    FloatingProgressBar(value: secondaryValue, color: quotaColor(secondaryValue), height: 5)
                     Text(secondaryValue.map { "\($0)%" } ?? "--")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(color.opacity(0.85))
+                        .foregroundStyle(quotaColor(secondaryValue))
                         .frame(width: 42, alignment: .trailing)
                 }
             }
         }
     }
+}
+
+private struct FloatingCopyButton: View {
+    let title: String
+    let isCopied: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(.white.opacity(isCopied ? 0.92 : 0.66))
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(.white.opacity(isCopied ? 0.12 : 0.07), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.10), lineWidth: 0.7))
+        }
+        .buttonStyle(.borderless)
+        .help("复制 \(title) Key")
+    }
+}
+
+private func quotaColor(_ value: Int?) -> Color {
+    guard let value else { return .white.opacity(0.46) }
+    if value <= 20 { return .red }
+    if value <= 50 { return .yellow }
+    return .green
 }
 
 private struct FloatingProgressBar: View {
@@ -1389,6 +1440,16 @@ private extension Color {
             green: Double((value >> 8) & 0xff) / 255,
             blue: Double(value & 0xff) / 255
         )
+    }
+}
+
+private extension APIKeyProviderConfig {
+    var shortCopyTitle: String {
+        switch id {
+        case .deepseek: return "复制 DS"
+        case .minimax: return "复制 MM"
+        case .comfly: return "复制 CF"
+        }
     }
 }
 
