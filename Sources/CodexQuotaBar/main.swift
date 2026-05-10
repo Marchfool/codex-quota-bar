@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
+                contentRect: NSRect(x: 0, y: 0, width: 360, height: 360),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -212,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 580, y: screenFrame.maxY - 350))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 380, y: screenFrame.maxY - 390))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -737,7 +737,7 @@ private struct FloatingDesktopWidgetView: View {
                         .foregroundStyle(.white.opacity(0.36))
                 }
 
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     FloatingBarCard(title: "5 小时", value: metric(.session), color: .green)
                     FloatingBarCard(title: "周额度", value: metric(.weekly), color: .cyan)
                 }
@@ -757,9 +757,9 @@ private struct FloatingDesktopWidgetView: View {
                     FloatingModelBar(title: "Comfly", value: apiRemaining(.comfly), color: Color(hex: APIKeyProviderID.comfly.colorHex) ?? .orange)
                 }
             }
-            .padding(22)
+            .padding(18)
         }
-        .frame(width: 560, height: 320)
+        .frame(width: 360, height: 360)
         .clipShape(RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.24), lineWidth: 1.1))
         .preferredColorScheme(.dark)
@@ -808,17 +808,17 @@ private struct FloatingBarCard: View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.54))
                 Spacer()
                 Text(value.map { "\($0)%" } ?? "--")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(color)
             }
-            FloatingProgressBar(value: value, color: color, height: 9)
+            FloatingProgressBar(value: value, color: color, height: 8)
         }
-        .padding(17)
+        .padding(14)
         .frame(maxWidth: .infinity)
         .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 0.8))
@@ -839,15 +839,15 @@ private struct FloatingModelBar: View {
                     .fill(color)
                     .frame(width: 8, height: 8)
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.80))
-                    .frame(width: 88, alignment: .leading)
+                    .frame(width: 82, alignment: .leading)
                 FloatingProgressBar(value: value, color: color, height: 7)
                 Text(value.map { "\($0)%" } ?? "--")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(color)
-                    .frame(width: 46, alignment: .trailing)
+                    .frame(width: 42, alignment: .trailing)
             }
 
             if let secondaryTitle {
@@ -856,13 +856,13 @@ private struct FloatingModelBar: View {
                     Text(secondaryTitle)
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.40))
-                        .frame(width: 88, alignment: .leading)
+                        .frame(width: 82, alignment: .leading)
                     FloatingProgressBar(value: secondaryValue, color: color.opacity(0.72), height: 5)
                     Text(secondaryValue.map { "\($0)%" } ?? "--")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(color.opacity(0.85))
-                        .frame(width: 46, alignment: .trailing)
+                        .frame(width: 42, alignment: .trailing)
                 }
             }
         }
