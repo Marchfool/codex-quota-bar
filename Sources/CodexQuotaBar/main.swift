@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 326, height: 376)
+        popover.contentSize = NSSize(width: 352, height: 494)
         let hostingController = NSHostingController(
             rootView: MonitorPanelView(
                 manager: manager,
@@ -254,12 +254,12 @@ private struct MonitorPanelView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                 }
-                .frame(maxHeight: 266)
+                .frame(maxHeight: 392)
 
                 actionBar
             }
         }
-        .frame(width: 326, height: 376)
+        .frame(width: 352, height: 494)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .preferredColorScheme(.dark)
     }
@@ -311,7 +311,7 @@ private struct MonitorPanelView: View {
     }
 
     private var actionBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             IconButton(title: "刷新", systemImage: "arrow.clockwise", action: refresh)
                 .disabled(manager.isRefreshing)
             IconButton(title: "导入", systemImage: "person.crop.circle.badge.plus", action: importAccount)
@@ -330,10 +330,10 @@ private struct MonitorPanelView: View {
             .buttonStyle(.borderless)
             .help("退出")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .padding(.top, 7)
-        .padding(.bottom, 10)
-        .background(Color.black.opacity(0.12))
+        .padding(.bottom, 9)
+        .background(.black.opacity(0.16))
     }
 }
 
@@ -402,10 +402,10 @@ private struct APIBalanceSection: View {
     let openSettings: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("API Key 余额", systemImage: "key.fill")
-                    .font(.system(size: 11.5, weight: .semibold))
+                Label("模型余额", systemImage: "chart.bar.xaxis")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.82))
                 Spacer()
                 Button("管理", action: openSettings)
@@ -414,8 +414,10 @@ private struct APIBalanceSection: View {
                     .buttonStyle(.borderless)
             }
 
-            ForEach(manager.providers) { provider in
-                APIBalanceRow(provider: provider)
+            VStack(spacing: 9) {
+                ForEach(manager.providers) { provider in
+                    APIBalanceRow(provider: provider)
+                }
             }
 
             if let error = manager.lastError {
@@ -439,25 +441,43 @@ private struct APIBalanceRow: View {
     let provider: APIKeyProviderConfig
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(provider.displayName)
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.84))
-                .frame(width: 64, alignment: .leading)
-            Text(balanceText)
-                .font(.system(size: 11.5, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(provider.lastSnapshot?.status == .error ? .orange : .white)
-                .lineLimit(1)
-            Spacer()
-            Text(statusText)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+                Text(provider.displayName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .frame(width: 70, alignment: .leading)
+                Text(balanceText)
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(provider.lastSnapshot?.status == .error ? .orange : .white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Spacer()
+                Text(statusText)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.50))
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.white.opacity(0.105))
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color.opacity(provider.lastSnapshot == nil ? 0.25 : 0.86))
+                        .frame(width: proxy.size.width * CGFloat(provider.lastSnapshot?.usedPercent ?? 0) / 100)
+                }
+            }
+            .frame(height: 5)
+
+            Text(detailText)
                 .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.46))
+                .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
         }
-        .frame(height: 20)
     }
 
     private var color: Color {
@@ -481,6 +501,25 @@ private struct APIBalanceRow: View {
     private var statusText: String {
         guard let snapshot = provider.lastSnapshot else { return "--" }
         return "已用 \(snapshot.usedPercent)%"
+    }
+
+    private var detailText: String {
+        guard let snapshot = provider.lastSnapshot else { return "保存密钥后刷新余额" }
+        switch provider.id {
+        case .deepseek:
+            let used = snapshot.used ?? "--"
+            let total = snapshot.total ?? "--"
+            return "已用 \(used) / 总额 \(total)"
+        case .minimax:
+            let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
+            let interval = "\(snapshot.extras["intervalUsed"] ?? "--")/\(snapshot.extras["intervalTotal"] ?? "--")"
+            return "周 \(weekly) · 当前周期 \(interval)"
+        case .comfly:
+            if let balanceYuan = snapshot.extras["balanceYuan"] {
+                return "约 \(balanceYuan) · 原始 quota \(snapshot.extras["quota"] ?? "--")"
+            }
+            return "已用 \(snapshot.used ?? "--") / \(snapshot.total ?? "--")"
+        }
     }
 }
 
@@ -721,13 +760,13 @@ private struct IconButton: View {
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.84))
-                    .frame(width: 22, height: 16)
+                    .frame(width: 21, height: 15)
                 Text(title)
-                    .font(.system(size: 10))
+                    .font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(.white.opacity(0.52))
             }
-            .frame(width: 36, height: 31)
-            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 9))
+            .frame(width: 36, height: 30)
+            .background(Color.white.opacity(0.060), in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.borderless)
         .help(title)
