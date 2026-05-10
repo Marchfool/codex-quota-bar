@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 352, height: 494)
+        popover.contentSize = NSSize(width: 352, height: 560)
         let hostingController = NSHostingController(
             rootView: MonitorPanelView(
                 manager: manager,
@@ -254,12 +254,12 @@ private struct MonitorPanelView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                 }
-                .frame(maxHeight: 392)
+                .frame(maxHeight: 458)
 
                 actionBar
             }
         }
-        .frame(width: 352, height: 494)
+        .frame(width: 352, height: 560)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .preferredColorScheme(.dark)
     }
