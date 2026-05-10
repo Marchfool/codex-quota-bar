@@ -731,11 +731,11 @@ private struct FloatingDesktopWidgetView: View {
                 HStack {
                     Label("Codex 额度", systemImage: "terminal.fill")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.82))
+                        .foregroundStyle(.white.opacity(0.94))
                     Spacer()
                     Text(updatedText)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.32))
+                        .foregroundStyle(.white.opacity(0.48))
                 }
 
                 HStack(spacing: 12) {
@@ -750,7 +750,7 @@ private struct FloatingDesktopWidgetView: View {
                     HStack {
                         Label("模型余额", systemImage: "chart.bar.xaxis")
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.66))
+                            .foregroundStyle(.white.opacity(0.88))
                         Spacer()
                     }
                     FloatingModelBar(title: "DeepSeek", value: apiRemaining(.deepseek))
@@ -831,7 +831,7 @@ private struct FloatingBarCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.46))
+                    .foregroundStyle(.white.opacity(0.64))
                 Spacer()
                 Text(value.map { "\($0)%" } ?? "--")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
@@ -861,7 +861,7 @@ private struct FloatingModelBar: View {
                     .frame(width: 8, height: 8)
                 Text(title)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.74))
+                    .foregroundStyle(.white.opacity(0.90))
                     .frame(width: 82, alignment: .leading)
                 FloatingProgressBar(value: value, color: quotaColor(value), height: 7)
                 Text(value.map { "\($0)%" } ?? "--")
@@ -876,7 +876,7 @@ private struct FloatingModelBar: View {
                     Color.clear.frame(width: 8, height: 1)
                     Text(secondaryTitle)
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.34))
+                        .foregroundStyle(.white.opacity(0.54))
                         .frame(width: 82, alignment: .leading)
                     FloatingProgressBar(value: secondaryValue, color: quotaColor(secondaryValue), height: 5)
                     Text(secondaryValue.map { "\($0)%" } ?? "--")
@@ -903,11 +903,11 @@ private struct FloatingCopyButton: View {
                 Text(title)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
             }
-            .foregroundStyle(.white.opacity(isCopied ? 0.92 : 0.66))
+            .foregroundStyle(.white.opacity(isCopied ? 0.96 : 0.82))
             .frame(maxWidth: .infinity)
             .frame(height: 30)
-            .background(.white.opacity(isCopied ? 0.10 : 0.055), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.075), lineWidth: 0.7))
+            .background(.white.opacity(isCopied ? 0.12 : 0.075), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.11), lineWidth: 0.7))
         }
         .buttonStyle(.borderless)
         .help("复制 \(title) Key")
