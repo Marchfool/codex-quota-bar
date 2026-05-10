@@ -20,7 +20,7 @@ CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打�
 
 - Compact macOS menu bar readout for 5-hour and weekly Codex quota.
 - Glass-style popover dashboard with account, plan, refresh, and reset details.
-- API key manager with one-click copy and balance snapshots for DeepSeek, MiniMax, and Comfly.
+- API key manager with one-click copy, balance snapshots, and DeepSeek/MiniMax usage statistics.
 - Desktop WidgetKit widget for small and medium macOS widgets.
 - Silent import from the local Codex login at `~/.codex/auth.json`.
 - AIPlanMonitor-style profile and slot snapshot files for local inspection.

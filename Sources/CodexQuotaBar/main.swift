@@ -858,7 +858,7 @@ private struct APIKeyProviderEditor: View {
                 .frame(maxWidth: .infinity)
 
                 balanceBox
-                    .frame(width: 180)
+                    .frame(width: 224)
             }
 
             HStack {
@@ -926,6 +926,9 @@ private struct APIKeyProviderEditor: View {
                 .lineLimit(2)
             ProgressView(value: Double(provider.lastSnapshot?.usedPercent ?? 0), total: 100)
                 .tint(Color(hex: provider.colorHex) ?? .accentColor)
+            if let snapshot = provider.lastSnapshot {
+                APIProviderStatsView(providerID: provider.id, snapshot: snapshot)
+            }
         }
         .padding(12)
         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
@@ -947,6 +950,45 @@ private struct APIKeyProviderEditor: View {
         if let note = snapshot.note { return note }
         let total = snapshot.total.map { " / \($0)" } ?? ""
         return "已用 \(snapshot.usedPercent)%\(total)"
+    }
+}
+
+private struct APIProviderStatsView: View {
+    let providerID: APIKeyProviderID
+    let snapshot: APIBalanceSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            switch providerID {
+            case .deepseek:
+                stat("已用", snapshot.used ?? "--")
+                stat("总额度", snapshot.total ?? "--")
+                stat("赠送", snapshot.extras["grantedBalance"] ?? "--")
+                stat("充值", snapshot.extras["toppedUpBalance"] ?? "--")
+            case .minimax:
+                stat("周已用", "\(snapshot.extras["weeklyUsed"] ?? "--") / \(snapshot.extras["weeklyTotal"] ?? "--")")
+                stat("周剩余", snapshot.extras["weeklyRemains"] ?? snapshot.balance)
+                stat("周期已用", "\(snapshot.extras["intervalUsed"] ?? "--") / \(snapshot.extras["intervalTotal"] ?? "--")")
+                stat("周期剩余", "\(snapshot.extras["intervalRemains"] ?? "--") · \(snapshot.extras["intervalRemainsTime"] ?? "--")")
+            case .comfly:
+                EmptyView()
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func stat(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(.primary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .font(.system(size: 10.5, weight: .medium))
     }
 }
 

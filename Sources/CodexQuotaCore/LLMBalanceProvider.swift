@@ -110,7 +110,12 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
             total: "¥\(formatMoney(total))",
             usedPercent: usedPercent,
             currency: info.currency,
-            status: balance <= 0 ? .warning : .ok
+            status: balance <= 0 ? .warning : .ok,
+            extras: [
+                "grantedBalance": "¥\(formatMoney(granted))",
+                "toppedUpBalance": "¥\(formatMoney(toppedUp))",
+                "remainingPercent": "\(max(0, 100 - usedPercent))"
+            ]
         )
     }
 
@@ -146,10 +151,13 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
                 "weeklyRemains": "\(weeklyRemains)",
                 "weeklyUsed": "\(weeklyUsed)",
                 "weeklyTotal": "\(weeklyTotal)",
+                "weeklyUsedPercent": "\(weeklyPercent)",
+                "weeklyRemainingPercent": "\(max(0, 100 - weeklyPercent))",
                 "intervalRemains": "\(intervalRemains)",
                 "intervalUsed": "\(intervalUsed)",
                 "intervalTotal": "\(intervalTotal)",
                 "intervalUsedPercent": "\(intervalPercent)",
+                "intervalRemainingPercent": "\(max(0, 100 - intervalPercent))",
                 "intervalRemainsTime": intervalTime
             ]
         )

@@ -135,6 +135,8 @@ struct TestRunner {
         """.utf8), providerID: .deepseek)
         expect(deepseek.balance == "¥12.50", "expected DeepSeek balance")
         expect(deepseek.usedPercent == 17, "expected DeepSeek used percent")
+        expect(deepseek.extras["grantedBalance"] == "¥10.00", "expected DeepSeek granted balance")
+        expect(deepseek.extras["toppedUpBalance"] == "¥5.00", "expected DeepSeek topped up balance")
 
         let minimax = try provider.decodeBalance(data: Data("""
         {
@@ -153,6 +155,8 @@ struct TestRunner {
         """.utf8), providerID: .minimax)
         expect(minimax.balance == "75", "expected MiniMax weekly remains")
         expect(minimax.extras["intervalRemainsTime"] == "1小时30分", "expected MiniMax interval reset text")
+        expect(minimax.extras["weeklyUsedPercent"] == "25", "expected MiniMax weekly used percent")
+        expect(minimax.extras["intervalRemainingPercent"] == "75", "expected MiniMax interval remaining percent")
 
         let comfly = try provider.decodeBalance(data: Data("""
         {"success": true, "data": {"quota": 500247, "used_quota": 500247}}

@@ -20,7 +20,7 @@ CodexQuotaBar is a small native macOS menu bar app for monitoring Codex quota wi
 
 - 在 macOS 状态栏紧凑显示 `5h` 与 `W` 两个额度。
 - 毛玻璃风格下拉面板，展示账号、套餐、刷新时间和重置时间。
-- API Key 管理器，支持 DeepSeek、MiniMax、Comfly 的一键复制和余额展示。
+- API Key 管理器，支持一键复制、余额展示，以及 DeepSeek/MiniMax 使用统计。
 - 提供 macOS 桌面组件，小尺寸和中尺寸都能显示 5 小时额度与周额度。
 - 首次启动静默读取本机 Codex 登录文件 `~/.codex/auth.json`。
 - 保存 AIPlanMonitor 风格的本地 profile 和 slot 快照，方便排查。
