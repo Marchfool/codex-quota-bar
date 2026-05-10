@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 430, height: 174),
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 220),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -212,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 450, y: screenFrame.maxY - 204))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 580, y: screenFrame.maxY - 250))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -726,19 +726,19 @@ private struct FloatingDesktopWidgetView: View {
                 endPoint: .bottomTrailing
             )
 
-            HStack(spacing: 22) {
+            HStack(spacing: 24) {
                 FloatingGauge(title: "5h", value: metric(.session), systemImage: "terminal.fill", color: .green)
                 FloatingGauge(title: "周", value: metric(.weekly), systemImage: "calendar", color: .cyan)
-                FloatingGauge(title: "DS", value: apiRemaining(.deepseek), systemImage: "sparkle.magnifyingglass", color: Color(hex: APIKeyProviderID.deepseek.colorHex) ?? .blue)
+                FloatingGauge(title: "DS", value: apiRemaining(.deepseek), systemImage: "magnifyingglass.circle.fill", color: Color(hex: APIKeyProviderID.deepseek.colorHex) ?? .blue)
                 FloatingGauge(title: "MM", value: apiRemaining(.minimax), systemImage: "brain.head.profile", color: Color(hex: APIKeyProviderID.minimax.colorHex) ?? .purple)
                 FloatingGauge(title: "CF", value: apiRemaining(.comfly), systemImage: "bolt.fill", color: Color(hex: APIKeyProviderID.comfly.colorHex) ?? .orange)
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 20)
+            .padding(.horizontal, 34)
+            .padding(.vertical, 24)
         }
-        .frame(width: 430, height: 174)
-        .clipShape(RoundedRectangle(cornerRadius: 26))
-        .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.24), lineWidth: 1.1))
+        .frame(width: 560, height: 220)
+        .clipShape(RoundedRectangle(cornerRadius: 28))
+        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.24), lineWidth: 1.1))
         .preferredColorScheme(.dark)
     }
 
@@ -772,31 +772,31 @@ private struct FloatingGauge: View {
         VStack(spacing: 10) {
             ZStack {
                 Circle()
-                    .stroke(.white.opacity(0.10), lineWidth: 9)
+                    .stroke(.white.opacity(0.10), lineWidth: 11)
                 Circle()
                     .trim(from: 0, to: CGFloat(clampedValue) / 100)
                     .stroke(
                         color,
-                        style: StrokeStyle(lineWidth: 9, lineCap: .round)
+                        style: StrokeStyle(lineWidth: 11, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
                 Image(systemName: systemImage)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.78))
             }
-            .frame(width: 62, height: 62)
+            .frame(width: 78, height: 78)
 
             VStack(spacing: 1) {
                 Text(value.map { "\($0)%" } ?? "--")
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.86))
                 Text(title)
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.40))
             }
         }
-        .frame(width: 62)
+        .frame(width: 78)
     }
 
     private var clampedValue: Int {
