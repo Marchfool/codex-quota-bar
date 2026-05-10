@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 236, height: 214),
+                contentRect: NSRect(x: 0, y: 0, width: 288, height: 238),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -212,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 256, y: screenFrame.maxY - 244))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 308, y: screenFrame.maxY - 268))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -726,7 +726,7 @@ private struct FloatingDesktopWidgetView: View {
                 endPoint: .bottomTrailing
             )
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 9) {
                 HStack {
                     Label("Codex", systemImage: "terminal.fill")
                         .font(.system(size: 11.5, weight: .semibold))
@@ -760,11 +760,11 @@ private struct FloatingDesktopWidgetView: View {
                     }
                 }
             }
-            .padding(10)
+            .padding(12)
         }
-        .frame(width: 236, height: 214)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.14), lineWidth: 0.8))
+        .frame(width: 288, height: 238)
+        .clipShape(RoundedRectangle(cornerRadius: 17))
+        .overlay(RoundedRectangle(cornerRadius: 17).stroke(.white.opacity(0.14), lineWidth: 0.8))
         .preferredColorScheme(.dark)
     }
 
@@ -784,14 +784,14 @@ private struct FloatingAPIProviderRow: View {
     let provider: APIKeyProviderConfig
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 9) {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(shortName)
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.74))
-                .frame(width: 34, alignment: .leading)
+                .frame(width: 42, alignment: .leading)
             VStack(spacing: 3) {
                 if provider.id == .minimax {
                     FloatingMiniMeter(label: "5h", remainingPercent: minimaxIntervalRemaining, color: color)
@@ -802,10 +802,12 @@ private struct FloatingAPIProviderRow: View {
             }
             Spacer(minLength: 4)
             Text(percentText)
-                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                .font(.system(size: 11.5, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(color)
-                .frame(width: 34, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .frame(width: 58, alignment: .trailing)
         }
     }
 
@@ -818,7 +820,7 @@ private struct FloatingAPIProviderRow: View {
     }
 
     private var percentText: String {
-        provider.id == .minimax ? "\(minimaxIntervalRemaining)/\(minimaxWeeklyRemaining)" : "\(remainingPercent)"
+        provider.id == .minimax ? "\(minimaxIntervalRemaining)%/\(minimaxWeeklyRemaining)%" : "\(remainingPercent)%"
     }
 
     private var color: Color {
@@ -864,7 +866,7 @@ private struct FloatingMiniMeter: View {
                 Text(label)
                     .font(.system(size: 8.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.34))
-                    .frame(width: 14, alignment: .leading)
+                    .frame(width: 18, alignment: .leading)
             }
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -877,7 +879,7 @@ private struct FloatingMiniMeter: View {
             }
             .frame(height: 4)
         }
-        .frame(height: 6)
+        .frame(height: 7)
     }
 }
 
@@ -894,7 +896,7 @@ private struct FloatingMetric: View {
                     .foregroundStyle(.white.opacity(0.58))
                 Spacer()
                 Text(value.map { "\($0)%" } ?? "--")
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(color)
             }
@@ -902,7 +904,7 @@ private struct FloatingMetric: View {
                 .tint(color)
                 .scaleEffect(y: 0.55, anchor: .center)
         }
-        .padding(8)
+        .padding(9)
         .frame(maxWidth: .infinity)
         .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.11), lineWidth: 0.7))
