@@ -918,7 +918,7 @@ private func quotaColor(_ value: Int?) -> Color {
     guard let value else { return .white.opacity(0.46) }
     if value <= 20 { return Color(red: 0.72, green: 0.25, blue: 0.28) }
     if value <= 50 { return Color(red: 0.68, green: 0.55, blue: 0.25) }
-    return Color(red: 0.18, green: 0.84, blue: 0.38)
+    return Color(red: 0.19, green: 0.90, blue: 0.39)
 }
 
 private struct FloatingProgressBar: View {
@@ -932,7 +932,7 @@ private struct FloatingProgressBar: View {
                 RoundedRectangle(cornerRadius: height / 2)
                     .fill(.white.opacity(0.075))
                 RoundedRectangle(cornerRadius: height / 2)
-                    .fill(color.opacity(0.78))
+                    .fill(color.opacity(0.92))
                     .frame(width: proxy.size.width * CGFloat(clampedValue) / 100)
             }
         }
