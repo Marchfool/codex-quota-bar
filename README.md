@@ -1,6 +1,16 @@
 # CodexQuotaBar
 
+Language: **English** | [简体中文](docs/i18n/README.zh-CN.md) | [日本語](docs/i18n/README.ja.md) | [한국어](docs/i18n/README.ko.md) | [Español](docs/i18n/README.es.md) | [Français](docs/i18n/README.fr.md) | [Deutsch](docs/i18n/README.de.md)
+
 Native macOS menu bar app for showing Codex quota snapshots across one or more account slots.
+
+## Features
+
+- Compact macOS menu bar readout for 5-hour and weekly Codex quota.
+- Glass-style popover dashboard with account, plan, refresh, and reset details.
+- Silent import from the local Codex login at `~/.codex/auth.json`.
+- AIPlanMonitor-style profile and slot snapshot files for local inspection.
+- DMG packaging script and generated app icons.
 
 ## Build
 
@@ -55,7 +65,7 @@ open /Applications/CodexQuotaBar.app
 The official Codex quota endpoint is isolated behind `OfficialCodexProvider` because OpenAI does not document a stable public subscription-quota API for this use case. Override endpoints without touching UI code:
 
 ```sh
-CODEX_QUOTA_ENDPOINT="https://chatgpt.com/backend-api/codex/usage" \
+CODEX_QUOTA_ENDPOINT="https://chatgpt.com/backend-api/wham/usage" \
 OPENAI_OAUTH_TOKEN_ENDPOINT="https://auth.openai.com/oauth/token" \
 swift run CodexQuotaBar
 ```
