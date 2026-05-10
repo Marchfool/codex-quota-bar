@@ -20,6 +20,7 @@ CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打�
 
 - Compact macOS menu bar readout for 5-hour and weekly Codex quota.
 - Glass-style popover dashboard with account, plan, refresh, and reset details.
+- API key manager with one-click copy and balance snapshots for DeepSeek, MiniMax, and Comfly.
 - Desktop WidgetKit widget for small and medium macOS widgets.
 - Silent import from the local Codex login at `~/.codex/auth.json`.
 - AIPlanMonitor-style profile and slot snapshot files for local inspection.
@@ -43,9 +44,12 @@ The app bundle is written to:
 
 - Snapshot JSON: `~/Library/Application Support/CodexQuotaBar/codex_slots.json`
 - Imported profile JSON: `~/Library/Application Support/CodexQuotaBar/codex_profiles.json`
+- API key config JSON: `~/Library/Application Support/CodexQuotaBar/api_keys.json`
 - Keychain mirror: macOS Keychain service `com.codexquotabar.secrets`
 
 `Import Current Codex Account` reads `~/.codex/auth.json` and stores an AIPlanMonitor-style profile containing `authJSON`, account identity fields, slot id, and credential fingerprint. Tokens are also mirrored into Keychain so the provider can refresh without reparsing the profile file.
+
+The API key config file stores provider templates, non-secret fields, and the last balance snapshot. DeepSeek/MiniMax API keys and the Comfly token are stored in Keychain, not in JSON.
 
 Because `codex_profiles.json` contains imported auth JSON, keep the file private to your macOS user account.
 

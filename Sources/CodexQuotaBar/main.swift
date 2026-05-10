@@ -7,7 +7,9 @@ import WidgetKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var manager: QuotaManager!
+    private var apiKeyManager: APIKeyManager!
     private var accountsWindow: NSWindow?
+    private var apiKeysWindow: NSWindow?
     private var desktopWidgetWindow: NSPanel?
     private let popover = NSPopover()
 
@@ -20,7 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             provider: OfficialCodexProvider(secretStore: secretStore),
             importer: CodexAuthImporter(secretStore: secretStore, profileStore: FileProfileStore())
         )
+        apiKeyManager = APIKeyManager(store: FileAPIKeyConfigStore(), secretStore: secretStore)
         manager.load()
+        apiKeyManager.load()
         silentlyImportCurrentCodexAccount()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -30,13 +34,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 326, height: 306)
+        popover.contentSize = NSSize(width: 326, height: 376)
         let hostingController = NSHostingController(
             rootView: MonitorPanelView(
                 manager: manager,
+                apiKeyManager: apiKeyManager,
                 refresh: { [weak self] in self?.refreshNow() },
                 importAccount: { [weak self] in self?.importAccount() },
                 showAccounts: { [weak self] in self?.showAccounts() },
+                showAPIKeys: { [weak self] in self?.showAPIKeys() },
                 toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
                 openDataFolder: { [weak self] in self?.openLogs() },
                 quit: { [weak self] in self?.quit() }
@@ -48,10 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task {
             await manager.refreshAll()
+            await apiKeyManager.refreshAll()
             WidgetCenter.shared.reloadAllTimelines()
             configureStatusButton()
         }
         manager.startPolling()
+        apiKeyManager.startPolling()
 
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -105,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refreshNow() {
         Task {
             await manager.refreshAll()
+            await apiKeyManager.refreshAll()
             WidgetCenter.shared.reloadAllTimelines()
             configureStatusButton()
         }
@@ -132,6 +141,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             accountsWindow = window
         }
         accountsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showAPIKeys() {
+        popover.performClose(nil)
+        if apiKeysWindow == nil {
+            let view = APIKeySettingsView(manager: apiKeyManager)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "API Key 与余额"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: view)
+            window.center()
+            apiKeysWindow = window
+        }
+        apiKeysWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -182,9 +211,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 private struct MonitorPanelView: View {
     @ObservedObject var manager: QuotaManager
+    @ObservedObject var apiKeyManager: APIKeyManager
     let refresh: () -> Void
     let importAccount: () -> Void
     let showAccounts: () -> Void
+    let showAPIKeys: () -> Void
     let toggleDesktopWidget: () -> Void
     let openDataFolder: () -> Void
     let quit: () -> Void
@@ -217,16 +248,18 @@ private struct MonitorPanelView: View {
                         if let lastError = manager.lastError {
                             MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
                         }
+
+                        APIBalanceSection(manager: apiKeyManager, openSettings: showAPIKeys)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                 }
-                .frame(maxHeight: 196)
+                .frame(maxHeight: 266)
 
                 actionBar
             }
         }
-        .frame(width: 326, height: 306)
+        .frame(width: 326, height: 376)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .preferredColorScheme(.dark)
     }
@@ -283,6 +316,7 @@ private struct MonitorPanelView: View {
                 .disabled(manager.isRefreshing)
             IconButton(title: "导入", systemImage: "person.crop.circle.badge.plus", action: importAccount)
             IconButton(title: "账号", systemImage: "person.2", action: showAccounts)
+            IconButton(title: "密钥", systemImage: "key", action: showAPIKeys)
             IconButton(title: "桌面", systemImage: "rectangle.on.rectangle", action: toggleDesktopWidget)
             IconButton(title: "数据", systemImage: "folder", action: openDataFolder)
             Spacer()
@@ -360,6 +394,93 @@ private struct SlotDashboardCard: View {
         let plan = slot.lastSnapshot?.extras["planType"].map { "套餐 \($0)" }
         let source = slot.lastSnapshot?.sourceLabel
         return [plan, source].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+private struct APIBalanceSection: View {
+    @ObservedObject var manager: APIKeyManager
+    let openSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("API Key 余额", systemImage: "key.fill")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                Spacer()
+                Button("管理", action: openSettings)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.74))
+                    .buttonStyle(.borderless)
+            }
+
+            ForEach(manager.providers) { provider in
+                APIBalanceRow(provider: provider)
+            }
+
+            if let error = manager.lastError {
+                MessageStrip(text: error, systemImage: "exclamationmark.triangle.fill")
+            }
+        }
+        .padding(10)
+        .background(
+            LinearGradient(
+                colors: [Color.white.opacity(0.105), Color.white.opacity(0.045)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 13)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.13), lineWidth: 0.8))
+    }
+}
+
+private struct APIBalanceRow: View {
+    let provider: APIKeyProviderConfig
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(provider.displayName)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.84))
+                .frame(width: 64, alignment: .leading)
+            Text(balanceText)
+                .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(provider.lastSnapshot?.status == .error ? .orange : .white)
+                .lineLimit(1)
+            Spacer()
+            Text(statusText)
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.46))
+        }
+        .frame(height: 20)
+    }
+
+    private var color: Color {
+        Color(hex: provider.colorHex) ?? .white.opacity(0.7)
+    }
+
+    private var balanceText: String {
+        guard let snapshot = provider.lastSnapshot else { return "未配置" }
+        if snapshot.status == .error {
+            return snapshot.note ?? "异常"
+        }
+        if let balanceYuan = snapshot.extras["balanceYuan"] {
+            return "\(snapshot.balance) · \(balanceYuan)"
+        }
+        if let unit = snapshot.unit {
+            return "\(snapshot.balance) \(unit)"
+        }
+        return snapshot.balance
+    }
+
+    private var statusText: String {
+        guard let snapshot = provider.lastSnapshot else { return "--" }
+        return "已用 \(snapshot.usedPercent)%"
     }
 }
 
@@ -613,6 +734,222 @@ private struct IconButton: View {
     }
 }
 
+private struct APIKeySettingsView: View {
+    @ObservedObject var manager: APIKeyManager
+    @State private var drafts: [String: String] = [:]
+    @State private var copiedField: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            ScrollView {
+                VStack(spacing: 12) {
+                    ForEach(manager.providers) { provider in
+                        APIKeyProviderEditor(
+                            provider: provider,
+                            values: bindingValues(for: provider),
+                            copiedField: copiedField,
+                            save: { save(provider) },
+                            refresh: { Task { await manager.refreshAll() } },
+                            copy: { field in copy(provider: provider, field: field) },
+                            setEnabled: { manager.setProviderEnabled(provider.id, isEnabled: $0) }
+                        )
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .frame(minWidth: 620, minHeight: 480)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear(perform: reloadDrafts)
+    }
+
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Key 与余额")
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                Text("默认配置 DeepSeek、MiniMax、Comfly。密钥保存到 macOS Keychain，点击复制可一键放入剪贴板。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                Task { await manager.refreshAll() }
+            } label: {
+                Label("刷新余额", systemImage: "arrow.clockwise")
+            }
+            .disabled(manager.isRefreshing)
+        }
+        .padding(16)
+        .background(.thinMaterial)
+    }
+
+    private func bindingValues(for provider: APIKeyProviderConfig) -> Binding<[String: String]> {
+        Binding(
+            get: {
+                Dictionary(uniqueKeysWithValues: provider.fields.map { field in
+                    ("\(provider.id.rawValue).\(field.key)", drafts["\(provider.id.rawValue).\(field.key)"] ?? "")
+                })
+            },
+            set: { newValue in
+                for (key, value) in newValue {
+                    drafts[key] = value
+                }
+            }
+        )
+    }
+
+    private func reloadDrafts() {
+        drafts = Dictionary(uniqueKeysWithValues: manager.providers.flatMap { provider in
+            provider.fields.map { field in
+                ("\(provider.id.rawValue).\(field.key)", manager.fieldValue(providerID: provider.id, key: field.key))
+            }
+        })
+    }
+
+    private func save(_ provider: APIKeyProviderConfig) {
+        let values = Dictionary(uniqueKeysWithValues: provider.fields.map { field in
+            (field.key, drafts["\(provider.id.rawValue).\(field.key)"] ?? "")
+        })
+        manager.saveValues(providerID: provider.id, values: values)
+        Task { await manager.refreshAll() }
+    }
+
+    private func copy(provider: APIKeyProviderConfig, field: APIKeyField) {
+        let key = "\(provider.id.rawValue).\(field.key)"
+        let value = drafts[key] ?? ""
+        guard !value.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        copiedField = key
+    }
+}
+
+private struct APIKeyProviderEditor: View {
+    let provider: APIKeyProviderConfig
+    @Binding var values: [String: String]
+    let copiedField: String?
+    let save: () -> Void
+    let refresh: () -> Void
+    let copy: (APIKeyField) -> Void
+    let setEnabled: (Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Circle()
+                    .fill(Color(hex: provider.colorHex) ?? .accentColor)
+                    .frame(width: 10, height: 10)
+                Text(provider.displayName)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Spacer()
+                Toggle("启用", isOn: Binding(get: { provider.isEnabled }, set: setEnabled))
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+            }
+
+            HStack(alignment: .top, spacing: 14) {
+                VStack(spacing: 10) {
+                    ForEach(provider.fields) { field in
+                        fieldRow(field)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+
+                balanceBox
+                    .frame(width: 180)
+            }
+
+            HStack {
+                Button(action: save) {
+                    Label("保存", systemImage: "checkmark.circle")
+                }
+                Button(action: refresh) {
+                    Label("刷新余额", systemImage: "arrow.clockwise")
+                }
+                Spacer()
+                Text("配置文件不会保存安全字段明文")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
+    }
+
+    private func fieldRow(_ field: APIKeyField) -> some View {
+        let key = "\(provider.id.rawValue).\(field.key)"
+        return HStack(spacing: 8) {
+            Text(field.label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 76, alignment: .leading)
+            if field.isSecure {
+                SecureField(field.placeholder, text: Binding(
+                    get: { values[key] ?? "" },
+                    set: { values[key] = $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+            } else {
+                TextField(field.placeholder, text: Binding(
+                    get: { values[key] ?? "" },
+                    set: { values[key] = $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+            }
+            Button {
+                copy(field)
+            } label: {
+                Image(systemName: copiedField == key ? "checkmark" : "doc.on.doc")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .help("复制 \(field.label)")
+        }
+    }
+
+    private var balanceBox: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("余额")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(balanceText)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(detailText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            ProgressView(value: Double(provider.lastSnapshot?.usedPercent ?? 0), total: 100)
+                .tint(Color(hex: provider.colorHex) ?? .accentColor)
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var balanceText: String {
+        guard let snapshot = provider.lastSnapshot else { return "未配置" }
+        if let balanceYuan = snapshot.extras["balanceYuan"] {
+            return "\(snapshot.balance) / \(balanceYuan)"
+        }
+        if let unit = snapshot.unit {
+            return "\(snapshot.balance) \(unit)"
+        }
+        return snapshot.balance
+    }
+
+    private var detailText: String {
+        guard let snapshot = provider.lastSnapshot else { return "保存后刷新余额" }
+        if let note = snapshot.note { return note }
+        let total = snapshot.total.map { " / \($0)" } ?? ""
+        return "已用 \(snapshot.usedPercent)%\(total)"
+    }
+}
+
 private struct AccountsView: View {
     @ObservedObject var manager: QuotaManager
 
@@ -666,6 +1003,23 @@ private struct AccountsView: View {
         }
         .padding(20)
         .onAppear { manager.load() }
+    }
+}
+
+private extension Color {
+    init?(hex: String) {
+        var text = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("#") {
+            text.removeFirst()
+        }
+        guard text.count == 6, let value = Int(text, radix: 16) else {
+            return nil
+        }
+        self.init(
+            red: Double((value >> 16) & 0xff) / 255,
+            green: Double((value >> 8) & 0xff) / 255,
+            blue: Double(value & 0xff) / 255
+        )
     }
 }
 

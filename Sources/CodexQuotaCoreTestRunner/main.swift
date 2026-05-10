@@ -7,11 +7,13 @@ struct TestRunner {
         try decodesExistingQuotaWindowShape()
         try providerDecodesFlexibleSchema()
         try providerDecodesWhamUsageSchema()
+        try llmBalanceProviderDecodesSamples()
         formattersClampPercent()
         await lowestRemainingUsesTightestAccount()
         await statusBarPrefersSessionWindow()
         await refreshFailureKeepsStaleSnapshot()
         try persistedSnapshotDoesNotContainSecrets()
+        try apiKeyStoreDoesNotPersistSecureValues()
         print("All CodexQuotaCore tests passed.")
     }
 
@@ -121,6 +123,44 @@ struct TestRunner {
         expect(QuotaFormatters.percentText(42) == "42%", "normal percentages should pass through")
     }
 
+    static func llmBalanceProviderDecodesSamples() throws {
+        let provider = LLMBalanceProvider()
+        let deepseek = try provider.decodeBalance(data: Data("""
+        {
+          "is_available": true,
+          "balance_infos": [
+            {"currency": "CNY", "total_balance": "12.50", "granted_balance": "10.00", "topped_up_balance": "5.00"}
+          ]
+        }
+        """.utf8), providerID: .deepseek)
+        expect(deepseek.balance == "¥12.50", "expected DeepSeek balance")
+        expect(deepseek.usedPercent == 17, "expected DeepSeek used percent")
+
+        let minimax = try provider.decodeBalance(data: Data("""
+        {
+          "base_resp": {"status_code": 0, "status_msg": ""},
+          "model_remains": [
+            {
+              "model_name": "MiniMax-M1",
+              "current_weekly_total_count": 100,
+              "current_weekly_usage_count": 25,
+              "current_interval_total_count": 20,
+              "current_interval_usage_count": 5,
+              "remains_time": 5400000
+            }
+          ]
+        }
+        """.utf8), providerID: .minimax)
+        expect(minimax.balance == "75", "expected MiniMax weekly remains")
+        expect(minimax.extras["intervalRemainsTime"] == "1小时30分", "expected MiniMax interval reset text")
+
+        let comfly = try provider.decodeBalance(data: Data("""
+        {"success": true, "data": {"quota": 500247, "used_quota": 500247}}
+        """.utf8), providerID: .comfly)
+        expect(comfly.balance == "B|1.00", "expected Comfly balance")
+        expect(comfly.extras["balanceYuan"] == "¥1.20", "expected Comfly CNY estimate")
+    }
+
     @MainActor
     static func lowestRemainingUsesTightestAccount() async {
         let store = MemorySlotStore(file: SlotFile(slots: [
@@ -192,6 +232,19 @@ struct TestRunner {
         expect(!text.contains("refresh_token"), "snapshot should not contain refresh token")
         expect(!text.contains("id_token"), "snapshot should not contain id token")
         expect(!text.contains("secret"), "snapshot should not contain generic secret fields")
+    }
+
+    static func apiKeyStoreDoesNotPersistSecureValues() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("api_keys.json")
+        let store = FileAPIKeyConfigStore(fileURL: url)
+        var file = APIKeyConfigFile()
+        file.providers[0].fields[0].value = "sk-secret-value"
+        try store.save(file)
+
+        let text = try String(contentsOf: url)
+        expect(!text.contains("sk-secret-value"), "API key config should not persist secure values")
+        expect(text.contains("deepseek"), "API key config should include default providers")
     }
 
     static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
