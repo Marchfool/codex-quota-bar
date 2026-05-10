@@ -14,6 +14,7 @@ struct TestRunner {
         await statusBarPrefersSessionWindow()
         await refreshFailureKeepsStaleSnapshot()
         try persistedSnapshotDoesNotContainSecrets()
+        try profileStoreDoesNotPersistAuthJSON()
         try apiKeyStoreDoesNotPersistSecureValues()
         print("All CodexQuotaCore tests passed.")
     }
@@ -246,6 +247,31 @@ struct TestRunner {
         expect(!text.contains("refresh_token"), "snapshot should not contain refresh token")
         expect(!text.contains("id_token"), "snapshot should not contain id token")
         expect(!text.contains("secret"), "snapshot should not contain generic secret fields")
+    }
+
+    static func profileStoreDoesNotPersistAuthJSON() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("codex_profiles.json")
+        let store = FileProfileStore(fileURL: url)
+        let profile = CodexProfile(
+            accountEmail: "user@example.com",
+            accountId: "acct-123",
+            accountSubject: "sub-123",
+            credentialFingerprint: "abcd1234",
+            displayName: "Codex A",
+            identityKey: "tenant:account:acct-123|principal:subject:sub-123",
+            isCurrentSystemAccount: true,
+            lastImportedAt: Date(timeIntervalSince1970: 1_000),
+            slotID: "A",
+            tenantKey: "account:acct-123"
+        )
+        try store.save(CodexProfileFile(profiles: [profile]))
+
+        let text = try String(contentsOf: url)
+        expect(!text.contains("authJSON"), "profile should not persist raw auth JSON")
+        expect(!text.contains("access_token"), "profile should not contain access token")
+        expect(!text.contains("refresh_token"), "profile should not contain refresh token")
+        expect(!text.contains("id_token"), "profile should not contain id token")
     }
 
     static func apiKeyStoreDoesNotPersistSecureValues() throws {

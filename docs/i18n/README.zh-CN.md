@@ -94,11 +94,17 @@ WidgetKit 系统组件：
 - API Key 配置：`~/Library/Application Support/CodexQuotaBar/api_keys.json`
 - 钥匙串镜像：macOS Keychain service `com.codexquotabar.secrets`
 
-`导入当前账号` 会读取 `~/.codex/auth.json`，保存包含 `authJSON`、账号身份字段、slot id 和 credential fingerprint 的本地 profile。令牌也会同步到钥匙串，供刷新额度使用。
+`导入当前账号` 会读取 `~/.codex/auth.json`，本地 profile 只保存账号身份字段、slot id 和 credential fingerprint。访问令牌会同步到钥匙串，普通 JSON 文件不再保存原始 auth JSON。
 
 API Key 配置文件只保存平台模板、非敏感字段和最后一次余额快照。DeepSeek/MiniMax 的 API key、Comfly token 会保存到 Keychain，不会写入普通 JSON。
 
-因为 `codex_profiles.json` 包含导入的 auth JSON，请只保存在自己的 macOS 用户账号下，不要上传或分享。
+`codex_profiles.json` 现在按元数据文件设计；它仍然会暴露本机账号标识，建议只保存在自己的 macOS 用户账号下，不要上传或分享。
+
+如果你有 Developer ID 证书，可以用稳定签名身份构建 DMG，减少 macOS 钥匙串反复弹窗：
+
+```sh
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make dmg
+```
 
 ## Provider 配置
 

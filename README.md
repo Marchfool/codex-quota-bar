@@ -47,11 +47,17 @@ The app bundle is written to:
 - API key config JSON: `~/Library/Application Support/CodexQuotaBar/api_keys.json`
 - Keychain mirror: macOS Keychain service `com.codexquotabar.secrets`
 
-`Import Current Codex Account` reads `~/.codex/auth.json` and stores an AIPlanMonitor-style profile containing `authJSON`, account identity fields, slot id, and credential fingerprint. Tokens are also mirrored into Keychain so the provider can refresh without reparsing the profile file.
+`Import Current Codex Account` reads `~/.codex/auth.json` and stores an AIPlanMonitor-style profile containing only account identity fields, slot id, and a credential fingerprint. Tokens are mirrored into Keychain so the provider can refresh without persisting raw auth JSON in ordinary files.
 
 The API key config file stores provider templates, non-secret fields, and the last balance snapshot. DeepSeek/MiniMax API keys and the Comfly token are stored in Keychain, not in JSON.
 
-Because `codex_profiles.json` contains imported auth JSON, keep the file private to your macOS user account.
+`codex_profiles.json` is designed to be metadata-only. Keep it private anyway because it still identifies local accounts.
+
+If you have a Developer ID certificate, build with a stable signing identity to reduce repeated macOS Keychain prompts:
+
+```sh
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make dmg
+```
 
 ## Install
 

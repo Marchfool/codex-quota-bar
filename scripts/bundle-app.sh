@@ -36,5 +36,6 @@ cp "$ROOT/Resources/WidgetInfo.plist" "$WIDGET/Contents/Info.plist"
 chmod +x "$WIDGET/Contents/MacOS/CodexQuotaWidget"
 
 xattr -cr "$APP" 2>/dev/null || true
-codesign --force --deep --sign - "$APP" >/dev/null
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP" >/dev/null
 echo "$APP"

@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var manager: QuotaManager!
     private var apiKeyManager: APIKeyManager!
+    private var secretStore: KeychainSecretStore!
+    private var profileStore: FileProfileStore!
     private var accountsWindow: NSWindow?
     private var apiKeysWindow: NSWindow?
     private var desktopWidgetWindow: NSPanel?
@@ -16,16 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        let secretStore = KeychainSecretStore()
+        secretStore = KeychainSecretStore()
+        profileStore = FileProfileStore()
         manager = QuotaManager(
             store: FileSlotStore(),
             provider: OfficialCodexProvider(secretStore: secretStore),
-            importer: CodexAuthImporter(secretStore: secretStore, profileStore: FileProfileStore())
+            importer: CodexAuthImporter(secretStore: secretStore, profileStore: profileStore)
         )
         apiKeyManager = APIKeyManager(store: FileAPIKeyConfigStore(), secretStore: secretStore)
         manager.load()
         apiKeyManager.load()
-        silentlyImportCurrentCodexAccount()
+        migrateStoredProfiles()
+        importCurrentCodexAccountIfNeeded()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.target = self
@@ -229,6 +233,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func silentlyImportCurrentCodexAccount() {
         manager.importCurrentCodexAccount()
         manager.load()
+    }
+
+    private func importCurrentCodexAccountIfNeeded() {
+        manager.load()
+        let activeSlots = manager.slots.filter(\.isActive)
+        guard !activeSlots.isEmpty else {
+            silentlyImportCurrentCodexAccount()
+            return
+        }
+
+        if activeSlots.contains(where: { !hasStoredCodexCredential(for: $0) }) {
+            silentlyImportCurrentCodexAccount()
+        }
+    }
+
+    private func hasStoredCodexCredential(for slot: AccountSlot) -> Bool {
+        storedSecret(SecretAccount.accessToken(slotID: slot.slotID)) != nil ||
+            storedSecret(SecretAccount.refreshToken(slotID: slot.slotID)) != nil ||
+            storedSecret(SecretAccount.idToken(slotID: slot.slotID)) != nil
+    }
+
+    private func storedSecret(_ account: String) -> String? {
+        do {
+            return try secretStore.get(account: account)
+        } catch {
+            return nil
+        }
+    }
+
+    private func migrateStoredProfiles() {
+        do {
+            _ = try profileStore.load()
+        } catch {
+            NSLog("CodexQuotaBar profile migration failed: \(error.localizedDescription)")
+        }
     }
 }
 

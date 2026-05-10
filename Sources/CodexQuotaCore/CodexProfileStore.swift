@@ -14,7 +14,6 @@ public struct CodexProfile: Codable, Equatable, Identifiable, Sendable {
     public var accountEmail: String
     public var accountId: String?
     public var accountSubject: String
-    public var authJSON: String
     public var credentialFingerprint: String
     public var displayName: String
     public var identityKey: String
@@ -27,7 +26,6 @@ public struct CodexProfile: Codable, Equatable, Identifiable, Sendable {
         accountEmail: String,
         accountId: String?,
         accountSubject: String,
-        authJSON: String,
         credentialFingerprint: String,
         displayName: String,
         identityKey: String,
@@ -39,7 +37,6 @@ public struct CodexProfile: Codable, Equatable, Identifiable, Sendable {
         self.accountEmail = accountEmail
         self.accountId = accountId
         self.accountSubject = accountSubject
-        self.authJSON = authJSON
         self.credentialFingerprint = credentialFingerprint
         self.displayName = displayName
         self.identityKey = identityKey
@@ -74,7 +71,11 @@ public final class FileProfileStore: ProfileStore, @unchecked Sendable {
             return CodexProfileFile()
         }
         let data = try Data(contentsOf: fileURL)
-        return try DateCoding.jsonDecoder.decode(CodexProfileFile.self, from: data)
+        let file = try DateCoding.jsonDecoder.decode(CodexProfileFile.self, from: data)
+        if String(data: data, encoding: .utf8)?.contains("\"authJSON\"") == true {
+            try save(file)
+        }
+        return file
     }
 
     public func save(_ file: CodexProfileFile) throws {

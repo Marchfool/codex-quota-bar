@@ -80,7 +80,6 @@ public final class CodexAuthImporter: @unchecked Sendable {
             accountEmail: email,
             accountId: accountID,
             accountSubject: subject,
-            authJSON: authJSON,
             credentialFingerprint: fingerprint,
             displayName: "Codex \(slotID)",
             identityKey: accountKey,
