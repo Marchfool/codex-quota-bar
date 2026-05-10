@@ -758,6 +758,7 @@ private struct FloatingDesktopWidgetView: View {
                 }
             }
             .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(width: 360, height: 360)
         .clipShape(RoundedRectangle(cornerRadius: 28))
