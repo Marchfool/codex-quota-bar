@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 360, height: 360),
+                contentRect: NSRect(x: 0, y: 0, width: 340, height: 340),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -212,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 380, y: screenFrame.maxY - 390))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 360, y: screenFrame.maxY - 370))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -727,7 +727,7 @@ private struct FloatingDesktopWidgetView: View {
                 endPoint: .bottomTrailing
             )
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 11) {
                 HStack {
                     Label("Codex 额度", systemImage: "terminal.fill")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
@@ -770,10 +770,10 @@ private struct FloatingDesktopWidgetView: View {
                     }
                 }
             }
-            .padding(18)
+            .padding(17)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(width: 360, height: 360)
+        .frame(width: 340, height: 340)
         .clipShape(RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.24), lineWidth: 1.1))
         .preferredColorScheme(.dark)
