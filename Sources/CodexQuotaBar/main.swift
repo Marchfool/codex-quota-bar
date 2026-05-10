@@ -371,20 +371,20 @@ private struct MonitorPanelView: View {
 
 private enum PanelMetrics {
     static let width: CGFloat = 352
-    static let minHeight: CGFloat = 390
-    static let maxHeight: CGFloat = 640
-    private static let chromeHeight: CGFloat = 102
+    static let minHeight: CGFloat = 460
+    static let maxHeight: CGFloat = 760
+    private static let chromeHeight: CGFloat = 126
 
     static func height(codexSlotCount: Int, apiProviderCount: Int, hasError: Bool) -> CGFloat {
-        let codexHeight: CGFloat = codexSlotCount == 0 ? 150 : CGFloat(codexSlotCount) * 190
-        let apiHeight: CGFloat = 62 + CGFloat(apiProviderCount) * 54
-        let errorHeight: CGFloat = hasError ? 42 : 0
-        let contentHeight = codexHeight + apiHeight + errorHeight + 24
+        let codexHeight: CGFloat = codexSlotCount == 0 ? 170 : CGFloat(codexSlotCount) * 215
+        let apiHeight: CGFloat = 74 + CGFloat(apiProviderCount) * 74
+        let errorHeight: CGFloat = hasError ? 52 : 0
+        let contentHeight = codexHeight + apiHeight + errorHeight + 36
         return min(maxHeight, max(minHeight, chromeHeight + contentHeight))
     }
 
     static func scrollHeight(for panelHeight: CGFloat) -> CGFloat {
-        max(220, panelHeight - chromeHeight)
+        max(280, panelHeight - chromeHeight)
     }
 }
 
