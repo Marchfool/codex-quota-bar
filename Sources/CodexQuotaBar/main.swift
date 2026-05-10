@@ -918,7 +918,7 @@ private func quotaColor(_ value: Int?) -> Color {
     guard let value else { return .white.opacity(0.46) }
     if value <= 20 { return Color(red: 0.72, green: 0.25, blue: 0.28) }
     if value <= 50 { return Color(red: 0.68, green: 0.55, blue: 0.25) }
-    return Color(red: 0.30, green: 0.62, blue: 0.42)
+    return Color(red: 0.18, green: 0.84, blue: 0.38)
 }
 
 private struct FloatingProgressBar: View {
