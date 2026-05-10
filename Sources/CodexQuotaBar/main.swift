@@ -1,6 +1,7 @@
 import AppKit
 import CodexQuotaCore
 import SwiftUI
+import WidgetKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -45,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task {
             await manager.refreshAll()
+            WidgetCenter.shared.reloadAllTimelines()
             configureStatusButton()
         }
         manager.startPolling()
@@ -101,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refreshNow() {
         Task {
             await manager.refreshAll()
+            WidgetCenter.shared.reloadAllTimelines()
             configureStatusButton()
         }
     }

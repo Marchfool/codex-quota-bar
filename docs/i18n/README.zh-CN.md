@@ -20,6 +20,7 @@ CodexQuotaBar is a small native macOS menu bar app for monitoring Codex quota wi
 
 - 在 macOS 状态栏紧凑显示 `5h` 与 `W` 两个额度。
 - 毛玻璃风格下拉面板，展示账号、套餐、刷新时间和重置时间。
+- 提供 macOS 桌面组件，小尺寸和中尺寸都能显示 5 小时额度与周额度。
 - 首次启动静默读取本机 Codex 登录文件 `~/.codex/auth.json`。
 - 保存 AIPlanMonitor 风格的本地 profile 和 slot 快照，方便排查。
 - 提供 DMG 打包脚本和自动生成的应用图标。
@@ -61,6 +62,18 @@ open .build/CodexQuotaBar.dmg
 xattr -dr com.apple.quarantine /Applications/CodexQuotaBar.app
 open /Applications/CodexQuotaBar.app
 ```
+
+## 桌面组件
+
+CodexQuotaBar 内置了 macOS WidgetKit 桌面组件。
+
+1. 将 `CodexQuotaBar.app` 安装到 `/Applications`。
+2. 启动一次应用，让它写入最新额度快照。
+3. 在桌面或通知中心打开 macOS 组件面板。
+4. 搜索 `Codex 额度` 或 `CodexQuotaBar`。
+5. 添加小尺寸或中尺寸组件。
+
+组件读取状态栏应用写入的本地快照。如果本地未签名构建安装后没有立刻出现在组件列表中，请退出并重新打开 CodexQuotaBar，或注销后重新登录，让 macOS 刷新组件扩展缓存。
 
 ## 运行数据
 

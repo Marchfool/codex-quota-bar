@@ -20,6 +20,7 @@ CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打�
 
 - Compact macOS menu bar readout for 5-hour and weekly Codex quota.
 - Glass-style popover dashboard with account, plan, refresh, and reset details.
+- Desktop WidgetKit widget for small and medium macOS widgets.
 - Silent import from the local Codex login at `~/.codex/auth.json`.
 - AIPlanMonitor-style profile and slot snapshot files for local inspection.
 - DMG packaging script and generated app icons.
@@ -71,6 +72,18 @@ If macOS blocks the unsigned app, open **System Settings -> Privacy & Security**
 xattr -dr com.apple.quarantine /Applications/CodexQuotaBar.app
 open /Applications/CodexQuotaBar.app
 ```
+
+## Desktop widget
+
+CodexQuotaBar includes a WidgetKit desktop widget.
+
+1. Install `CodexQuotaBar.app` into `/Applications`.
+2. Launch the app once so it can write the latest quota snapshot.
+3. Open macOS widgets from the desktop or Notification Center.
+4. Search for `Codex 额度` or `CodexQuotaBar`.
+5. Add the small or medium widget.
+
+The widget reads the local snapshot written by the menu bar app. If the widget does not appear immediately after installing a local unsigned build, quit and reopen CodexQuotaBar, or log out and back in so macOS refreshes its widget extension cache.
 
 ## Provider configuration
 

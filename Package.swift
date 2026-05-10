@@ -25,7 +25,8 @@ let package = Package(
             dependencies: ["CodexQuotaCore"],
             linkerSettings: [
                 .linkedFramework("SwiftUI"),
-                .linkedFramework("AppKit")
+                .linkedFramework("AppKit"),
+                .linkedFramework("WidgetKit")
             ]
         ),
         .executableTarget(
