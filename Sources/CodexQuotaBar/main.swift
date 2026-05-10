@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if desktopWidgetWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 220),
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -212,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 580, y: screenFrame.maxY - 250))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 580, y: screenFrame.maxY - 350))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -726,17 +726,40 @@ private struct FloatingDesktopWidgetView: View {
                 endPoint: .bottomTrailing
             )
 
-            HStack(spacing: 24) {
-                FloatingGauge(title: "5h", value: metric(.session), systemImage: "terminal.fill", color: .green)
-                FloatingGauge(title: "周", value: metric(.weekly), systemImage: "calendar", color: .cyan)
-                FloatingGauge(title: "DS", value: apiRemaining(.deepseek), systemImage: "magnifyingglass.circle.fill", color: Color(hex: APIKeyProviderID.deepseek.colorHex) ?? .blue)
-                FloatingGauge(title: "MM", value: apiRemaining(.minimax), systemImage: "brain.head.profile", color: Color(hex: APIKeyProviderID.minimax.colorHex) ?? .purple)
-                FloatingGauge(title: "CF", value: apiRemaining(.comfly), systemImage: "bolt.fill", color: Color(hex: APIKeyProviderID.comfly.colorHex) ?? .orange)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Label("Codex 额度", systemImage: "terminal.fill")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.88))
+                    Spacer()
+                    Text(updatedText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.36))
+                }
+
+                HStack(spacing: 14) {
+                    FloatingBarCard(title: "5 小时", value: metric(.session), color: .green)
+                    FloatingBarCard(title: "周额度", value: metric(.weekly), color: .cyan)
+                }
+
+                Divider()
+                    .overlay(.white.opacity(0.12))
+
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Label("模型余额", systemImage: "chart.bar.xaxis")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.72))
+                        Spacer()
+                    }
+                    FloatingModelBar(title: "DeepSeek", value: apiRemaining(.deepseek), color: Color(hex: APIKeyProviderID.deepseek.colorHex) ?? .blue)
+                    FloatingModelBar(title: "MiniMax 5h", value: apiRemaining(.minimax), secondaryTitle: "周", secondaryValue: apiWeeklyRemaining(.minimax), color: Color(hex: APIKeyProviderID.minimax.colorHex) ?? .purple)
+                    FloatingModelBar(title: "Comfly", value: apiRemaining(.comfly), color: Color(hex: APIKeyProviderID.comfly.colorHex) ?? .orange)
+                }
             }
-            .padding(.horizontal, 34)
-            .padding(.vertical, 24)
+            .padding(22)
         }
-        .frame(width: 560, height: 220)
+        .frame(width: 560, height: 320)
         .clipShape(RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.24), lineWidth: 1.1))
         .preferredColorScheme(.dark)
@@ -744,6 +767,13 @@ private struct FloatingDesktopWidgetView: View {
 
     private func metric(_ kind: QuotaWindowKind) -> Int? {
         manager.slots.compactMap(\.lastSnapshot).flatMap(\.quotaWindows).first(where: { $0.kind == kind })?.remainingPercent
+    }
+
+    private var updatedText: String {
+        guard let updatedAt = manager.slots.compactMap(\.lastSnapshot).first?.updatedAt else {
+            return "尚未更新"
+        }
+        return QuotaFormatters.updatedText(updatedAt)
     }
 
     private func apiRemaining(_ providerID: APIKeyProviderID) -> Int? {
@@ -760,43 +790,101 @@ private struct FloatingDesktopWidgetView: View {
             return max(0, 100 - snapshot.usedPercent)
         }
     }
+
+    private func apiWeeklyRemaining(_ providerID: APIKeyProviderID) -> Int? {
+        guard let provider = apiKeyManager.providers.first(where: { $0.id == providerID }),
+              let snapshot = provider.lastSnapshot
+        else { return nil }
+        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "")
+    }
 }
 
-private struct FloatingGauge: View {
+private struct FloatingBarCard: View {
     let title: String
     let value: Int?
-    let systemImage: String
     let color: Color
 
     var body: some View {
-        VStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .stroke(.white.opacity(0.10), lineWidth: 11)
-                Circle()
-                    .trim(from: 0, to: CGFloat(clampedValue) / 100)
-                    .stroke(
-                        color,
-                        style: StrokeStyle(lineWidth: 11, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-                Image(systemName: systemImage)
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.78))
-            }
-            .frame(width: 78, height: 78)
-
-            VStack(spacing: 1) {
-                Text(value.map { "\($0)%" } ?? "--")
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.86))
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .firstTextBaseline) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.40))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.54))
+                Spacer()
+                Text(value.map { "\($0)%" } ?? "--")
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(color)
+            }
+            FloatingProgressBar(value: value, color: color, height: 9)
+        }
+        .padding(17)
+        .frame(maxWidth: .infinity)
+        .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 0.8))
+    }
+}
+
+private struct FloatingModelBar: View {
+    let title: String
+    let value: Int?
+    var secondaryTitle: String?
+    var secondaryValue: Int?
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.80))
+                    .frame(width: 88, alignment: .leading)
+                FloatingProgressBar(value: value, color: color, height: 7)
+                Text(value.map { "\($0)%" } ?? "--")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(color)
+                    .frame(width: 46, alignment: .trailing)
+            }
+
+            if let secondaryTitle {
+                HStack(spacing: 10) {
+                    Color.clear.frame(width: 8, height: 1)
+                    Text(secondaryTitle)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.40))
+                        .frame(width: 88, alignment: .leading)
+                    FloatingProgressBar(value: secondaryValue, color: color.opacity(0.72), height: 5)
+                    Text(secondaryValue.map { "\($0)%" } ?? "--")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(color.opacity(0.85))
+                        .frame(width: 46, alignment: .trailing)
+                }
             }
         }
-        .frame(width: 78)
+    }
+}
+
+private struct FloatingProgressBar: View {
+    let value: Int?
+    let color: Color
+    let height: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: height / 2)
+                    .fill(.white.opacity(0.10))
+                RoundedRectangle(cornerRadius: height / 2)
+                    .fill(color)
+                    .frame(width: proxy.size.width * CGFloat(clampedValue) / 100)
+            }
+        }
+        .frame(height: height)
     }
 
     private var clampedValue: Int {
