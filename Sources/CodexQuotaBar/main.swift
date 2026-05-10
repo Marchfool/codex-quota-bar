@@ -916,9 +916,9 @@ private struct FloatingCopyButton: View {
 
 private func quotaColor(_ value: Int?) -> Color {
     guard let value else { return .white.opacity(0.46) }
-    if value <= 20 { return .red }
-    if value <= 50 { return .yellow }
-    return .green
+    if value <= 20 { return Color(red: 0.86, green: 0.28, blue: 0.30) }
+    if value <= 50 { return Color(red: 0.82, green: 0.66, blue: 0.26) }
+    return Color(red: 0.27, green: 0.72, blue: 0.42)
 }
 
 private struct FloatingProgressBar: View {
@@ -932,7 +932,7 @@ private struct FloatingProgressBar: View {
                 RoundedRectangle(cornerRadius: height / 2)
                     .fill(.white.opacity(0.10))
                 RoundedRectangle(cornerRadius: height / 2)
-                    .fill(color)
+                    .fill(color.opacity(0.86))
                     .frame(width: proxy.size.width * CGFloat(clampedValue) / 100)
             }
         }
@@ -1446,9 +1446,9 @@ private extension Color {
 private extension APIKeyProviderConfig {
     var shortCopyTitle: String {
         switch id {
-        case .deepseek: return "复制 DS"
-        case .minimax: return "复制 MM"
-        case .comfly: return "复制 CF"
+        case .deepseek: return "DeepSeek"
+        case .minimax: return "MiniMax"
+        case .comfly: return "Comfly"
         }
     }
 }
