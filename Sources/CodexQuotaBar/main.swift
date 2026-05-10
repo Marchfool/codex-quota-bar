@@ -720,8 +720,8 @@ private struct FloatingDesktopWidgetView: View {
             VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
             LinearGradient(
                 colors: [
-                    Color.black.opacity(0.46),
-                    Color(red: 0.03, green: 0.06, blue: 0.10).opacity(0.72)
+                    Color.black.opacity(0.50),
+                    Color(red: 0.025, green: 0.035, blue: 0.045).opacity(0.78)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -731,11 +731,11 @@ private struct FloatingDesktopWidgetView: View {
                 HStack {
                     Label("Codex 额度", systemImage: "terminal.fill")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.88))
+                        .foregroundStyle(.white.opacity(0.82))
                     Spacer()
                     Text(updatedText)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.36))
+                        .foregroundStyle(.white.opacity(0.32))
                 }
 
                 HStack(spacing: 12) {
@@ -744,13 +744,13 @@ private struct FloatingDesktopWidgetView: View {
                 }
 
                 Divider()
-                    .overlay(.white.opacity(0.12))
+                    .overlay(.white.opacity(0.09))
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Label("模型余额", systemImage: "chart.bar.xaxis")
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.72))
+                            .foregroundStyle(.white.opacity(0.66))
                         Spacer()
                     }
                     FloatingModelBar(title: "DeepSeek", value: apiRemaining(.deepseek))
@@ -775,7 +775,7 @@ private struct FloatingDesktopWidgetView: View {
         }
         .frame(width: 340, height: 340)
         .clipShape(RoundedRectangle(cornerRadius: 28))
-        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.24), lineWidth: 1.1))
+        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.18), lineWidth: 1.0))
         .preferredColorScheme(.dark)
     }
 
@@ -831,7 +831,7 @@ private struct FloatingBarCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.54))
+                    .foregroundStyle(.white.opacity(0.46))
                 Spacer()
                 Text(value.map { "\($0)%" } ?? "--")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
@@ -842,8 +842,8 @@ private struct FloatingBarCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity)
-        .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 0.8))
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.08), lineWidth: 0.8))
     }
 }
 
@@ -861,7 +861,7 @@ private struct FloatingModelBar: View {
                     .frame(width: 8, height: 8)
                 Text(title)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.80))
+                    .foregroundStyle(.white.opacity(0.74))
                     .frame(width: 82, alignment: .leading)
                 FloatingProgressBar(value: value, color: quotaColor(value), height: 7)
                 Text(value.map { "\($0)%" } ?? "--")
@@ -876,7 +876,7 @@ private struct FloatingModelBar: View {
                     Color.clear.frame(width: 8, height: 1)
                     Text(secondaryTitle)
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.40))
+                        .foregroundStyle(.white.opacity(0.34))
                         .frame(width: 82, alignment: .leading)
                     FloatingProgressBar(value: secondaryValue, color: quotaColor(secondaryValue), height: 5)
                     Text(secondaryValue.map { "\($0)%" } ?? "--")
@@ -906,8 +906,8 @@ private struct FloatingCopyButton: View {
             .foregroundStyle(.white.opacity(isCopied ? 0.92 : 0.66))
             .frame(maxWidth: .infinity)
             .frame(height: 30)
-            .background(.white.opacity(isCopied ? 0.12 : 0.07), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.10), lineWidth: 0.7))
+            .background(.white.opacity(isCopied ? 0.10 : 0.055), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.075), lineWidth: 0.7))
         }
         .buttonStyle(.borderless)
         .help("复制 \(title) Key")
@@ -916,9 +916,9 @@ private struct FloatingCopyButton: View {
 
 private func quotaColor(_ value: Int?) -> Color {
     guard let value else { return .white.opacity(0.46) }
-    if value <= 20 { return Color(red: 0.86, green: 0.28, blue: 0.30) }
-    if value <= 50 { return Color(red: 0.82, green: 0.66, blue: 0.26) }
-    return Color(red: 0.27, green: 0.72, blue: 0.42)
+    if value <= 20 { return Color(red: 0.72, green: 0.25, blue: 0.28) }
+    if value <= 50 { return Color(red: 0.68, green: 0.55, blue: 0.25) }
+    return Color(red: 0.30, green: 0.62, blue: 0.42)
 }
 
 private struct FloatingProgressBar: View {
@@ -930,9 +930,9 @@ private struct FloatingProgressBar: View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: height / 2)
-                    .fill(.white.opacity(0.10))
+                    .fill(.white.opacity(0.075))
                 RoundedRectangle(cornerRadius: height / 2)
-                    .fill(color.opacity(0.86))
+                    .fill(color.opacity(0.78))
                     .frame(width: proxy.size.width * CGFloat(clampedValue) / 100)
             }
         }
