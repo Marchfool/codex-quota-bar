@@ -4,6 +4,18 @@
 
 CodexQuotaBar 是一个原生 macOS 状态栏应用，用于展示 Codex 的 5 小时额度和周额度。
 
+## 关于 / About
+
+CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打开 Codex 或 ChatGPT 界面的情况下查看 Codex 额度。它会静默读取本机 Codex 登录状态，同时展示 5 小时额度和周额度，并提供一个精致的下拉仪表盘。
+
+CodexQuotaBar is a small native macOS menu bar app for monitoring Codex quota without opening the Codex or ChatGPT UI. It silently imports your local Codex login, shows both the 5-hour and weekly windows, and keeps the detailed dashboard one click away.
+
+## 截图 / Screenshots
+
+![CodexQuotaBar 下拉仪表盘](../assets/screenshot-panel.png)
+
+![CodexQuotaBar 状态栏紧凑显示](../assets/screenshot-menubar.png)
+
 ## 功能
 
 - 在 macOS 状态栏紧凑显示 `5h` 与 `W` 两个额度。
