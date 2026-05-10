@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 importAccount: { [weak self] in self?.importAccount() },
                 showAccounts: { [weak self] in self?.showAccounts() },
                 showAPIKeys: { [weak self] in self?.showAPIKeys() },
+                refreshAPIKeys: { [weak self] in self?.refreshAPIKeys() },
                 toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
                 openDataFolder: { [weak self] in self?.openLogs() },
                 quit: { [weak self] in self?.quit() }
@@ -116,6 +117,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await apiKeyManager.refreshAll()
             WidgetCenter.shared.reloadAllTimelines()
             configureStatusButton()
+        }
+    }
+
+    @objc private func refreshAPIKeys() {
+        Task {
+            await apiKeyManager.refreshAll()
         }
     }
 
@@ -216,6 +223,7 @@ private struct MonitorPanelView: View {
     let importAccount: () -> Void
     let showAccounts: () -> Void
     let showAPIKeys: () -> Void
+    let refreshAPIKeys: () -> Void
     let toggleDesktopWidget: () -> Void
     let openDataFolder: () -> Void
     let quit: () -> Void
@@ -249,7 +257,7 @@ private struct MonitorPanelView: View {
                             MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
                         }
 
-                        APIBalanceSection(manager: apiKeyManager, openSettings: showAPIKeys)
+                        APIBalanceSection(manager: apiKeyManager, openSettings: showAPIKeys, refresh: refreshAPIKeys)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
@@ -400,15 +408,31 @@ private struct SlotDashboardCard: View {
 private struct APIBalanceSection: View {
     @ObservedObject var manager: APIKeyManager
     let openSettings: () -> Void
+    let refresh: () -> Void
     @State private var copiedProviderID: APIKeyProviderID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("模型余额", systemImage: "chart.bar.xaxis")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.82))
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("模型余额", systemImage: "chart.bar.xaxis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.82))
+                    Text(updatedText)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.40))
+                }
                 Spacer()
+                Button(action: refresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(manager.isRefreshing ? 0.36 : 0.72))
+                        .frame(width: 22, height: 20)
+                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isRefreshing)
+                .help("刷新模型余额")
                 Button("管理", action: openSettings)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.74))
@@ -447,6 +471,12 @@ private struct APIBalanceSection: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
         copiedProviderID = provider.id
+    }
+
+    private var updatedText: String {
+        let dates = manager.providers.compactMap(\.lastSnapshot?.updatedAt)
+        guard let latest = dates.max() else { return "尚未更新" }
+        return QuotaFormatters.updatedText(latest).replacingOccurrences(of: "updated ", with: "更新 ")
     }
 }
 
