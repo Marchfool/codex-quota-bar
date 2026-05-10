@@ -48,6 +48,15 @@ public final class APIKeyManager: ObservableObject {
         return field.value ?? ""
     }
 
+    public func primaryCopyValue(providerID: APIKeyProviderID) -> String {
+        switch providerID {
+        case .deepseek, .minimax:
+            return fieldValue(providerID: providerID, key: "apiKey")
+        case .comfly:
+            return fieldValue(providerID: providerID, key: "token")
+        }
+    }
+
     public func saveValues(providerID: APIKeyProviderID, values: [String: String]) {
         guard let providerIndex = providers.firstIndex(where: { $0.id == providerID }) else { return }
         for fieldIndex in providers[providerIndex].fields.indices {

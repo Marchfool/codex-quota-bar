@@ -400,6 +400,7 @@ private struct SlotDashboardCard: View {
 private struct APIBalanceSection: View {
     @ObservedObject var manager: APIKeyManager
     let openSettings: () -> Void
+    @State private var copiedProviderID: APIKeyProviderID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -416,7 +417,11 @@ private struct APIBalanceSection: View {
 
             VStack(spacing: 9) {
                 ForEach(manager.providers) { provider in
-                    APIBalanceRow(provider: provider)
+                    APIBalanceRow(
+                        provider: provider,
+                        isCopied: copiedProviderID == provider.id,
+                        copy: { copyPrimaryKey(for: provider) }
+                    )
                 }
             }
 
@@ -435,10 +440,20 @@ private struct APIBalanceSection: View {
         )
         .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.13), lineWidth: 0.8))
     }
+
+    private func copyPrimaryKey(for provider: APIKeyProviderConfig) {
+        let value = manager.primaryCopyValue(providerID: provider.id)
+        guard !value.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        copiedProviderID = provider.id
+    }
 }
 
 private struct APIBalanceRow: View {
     let provider: APIKeyProviderConfig
+    let isCopied: Bool
+    let copy: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -460,23 +475,35 @@ private struct APIBalanceRow: View {
                 Text(statusText)
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.50))
+                Button(action: copy) {
+                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(isCopied ? 0.92 : 0.60))
+                        .frame(width: 22, height: 20)
+                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.borderless)
+                .help("复制 \(provider.displayName) API Key")
             }
 
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.white.opacity(0.105))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(color.opacity(provider.lastSnapshot == nil ? 0.25 : 0.86))
-                        .frame(width: proxy.size.width * CGFloat(provider.lastSnapshot?.usedPercent ?? 0) / 100)
-                }
-            }
-            .frame(height: 5)
+            meterRows
 
             Text(detailText)
                 .font(.system(size: 10))
                 .foregroundStyle(.white.opacity(0.42))
                 .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private var meterRows: some View {
+        if provider.id == .minimax {
+            VStack(spacing: 4) {
+                APIUsageMeter(label: "5h", remainingPercent: minimaxIntervalRemaining, color: color)
+                APIUsageMeter(label: "周", remainingPercent: minimaxWeeklyRemaining, color: color.opacity(0.88))
+            }
+        } else {
+            APIUsageMeter(label: nil, remainingPercent: remainingPercent, color: color)
         }
     }
 
@@ -500,7 +527,7 @@ private struct APIBalanceRow: View {
 
     private var statusText: String {
         guard let snapshot = provider.lastSnapshot else { return "--" }
-        return "已用 \(snapshot.usedPercent)%"
+        return "剩余 \(remainingPercent)%"
     }
 
     private var detailText: String {
@@ -513,12 +540,66 @@ private struct APIBalanceRow: View {
         case .minimax:
             let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
             let interval = "\(snapshot.extras["intervalUsed"] ?? "--")/\(snapshot.extras["intervalTotal"] ?? "--")"
-            return "周 \(weekly) · 当前周期 \(interval)"
+            return "5h \(interval) · 周 \(weekly)"
         case .comfly:
             if let balanceYuan = snapshot.extras["balanceYuan"] {
                 return "约 \(balanceYuan) · 原始 quota \(snapshot.extras["quota"] ?? "--")"
             }
             return "已用 \(snapshot.used ?? "--") / \(snapshot.total ?? "--")"
+        }
+    }
+
+    private var remainingPercent: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        switch provider.id {
+        case .deepseek:
+            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        case .minimax:
+            return minimaxIntervalRemaining
+        case .comfly:
+            return max(0, 100 - snapshot.usedPercent)
+        }
+    }
+
+    private var minimaxIntervalRemaining: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+    }
+
+    private var minimaxWeeklyRemaining: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+    }
+}
+
+private struct APIUsageMeter: View {
+    let label: String?
+    let remainingPercent: Int
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let label {
+                Text(label)
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.46))
+                    .frame(width: 16, alignment: .leading)
+            }
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.white.opacity(0.105))
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color.opacity(0.86))
+                        .frame(width: proxy.size.width * CGFloat(max(0, min(100, remainingPercent))) / 100)
+                }
+            }
+            .frame(height: 5)
+            Text("\(remainingPercent)%")
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.44))
+                .monospacedDigit()
+                .frame(width: 32, alignment: .trailing)
         }
     }
 }
