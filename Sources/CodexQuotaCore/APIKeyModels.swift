@@ -70,7 +70,8 @@ public struct APIKeyProviderConfig: Codable, Equatable, Identifiable, Sendable {
                 displayName: APIKeyProviderID.deepseek.displayName,
                 colorHex: APIKeyProviderID.deepseek.colorHex,
                 fields: [
-                    APIKeyField(key: "apiKey", label: "API Key", placeholder: "sk-...", isSecure: true)
+                    APIKeyField(key: "apiKey", label: "API Key", placeholder: "sk-...", isSecure: true),
+                    APIKeyField(key: "progressFullBalance", label: "满格余额(元)", placeholder: "10", isSecure: false, value: "10")
                 ]
             ),
             APIKeyProviderConfig(

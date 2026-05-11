@@ -40,13 +40,17 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw APIBalanceError.server(http.statusCode)
         }
-        return try decodeBalance(data: data, providerID: config.id)
+        return try decodeBalance(data: data, providerID: config.id, credentials: credentials)
     }
 
     public func decodeBalance(data: Data, providerID: APIKeyProviderID) throws -> APIBalanceSnapshot {
+        try decodeBalance(data: data, providerID: providerID, credentials: [:])
+    }
+
+    private func decodeBalance(data: Data, providerID: APIKeyProviderID, credentials: [String: String]) throws -> APIBalanceSnapshot {
         switch providerID {
         case .deepseek:
-            return try decodeDeepSeek(data)
+            return try decodeDeepSeek(data, fullBalance: deepSeekFullBalance(from: credentials))
         case .minimax:
             return try decodeMiniMax(data)
         case .comfly:
@@ -86,7 +90,7 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         return value
     }
 
-    private func decodeDeepSeek(_ data: Data) throws -> APIBalanceSnapshot {
+    private func decodeDeepSeek(_ data: Data, fullBalance: Decimal) throws -> APIBalanceSnapshot {
         let response = try JSONDecoder().decode(DeepSeekBalanceResponse.self, from: data)
         guard response.isAvailable else {
             throw APIBalanceError.provider("DeepSeek 账户不可用")
@@ -98,25 +102,32 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         let balance = Decimal(string: info.totalBalance) ?? 0
         let granted = Decimal(string: info.grantedBalance) ?? 0
         let toppedUp = Decimal(string: info.toppedUpBalance) ?? 0
-        let total = granted + toppedUp
-        let used = max(0, total - balance)
-        let totalDouble = (total as NSDecimalNumber).doubleValue
-        let usedDouble = (used as NSDecimalNumber).doubleValue
-        let usedPercent = totalDouble > 0 ? Int((usedDouble / totalDouble * 100).rounded()) : 0
+        let balanceDouble = (balance as NSDecimalNumber).doubleValue
+        let fullDouble = max(0.01, (fullBalance as NSDecimalNumber).doubleValue)
+        let remainingPercent = min(100, max(0, Int((balanceDouble / fullDouble * 100).rounded())))
+        let usedPercent = max(0, 100 - remainingPercent)
 
         return APIBalanceSnapshot(
             balance: "¥\(formatMoney(balance))",
-            used: "¥\(formatMoney(used))",
-            total: "¥\(formatMoney(total))",
+            total: "¥\(formatMoney(fullBalance))",
             usedPercent: usedPercent,
             currency: info.currency,
-            status: balance <= 0 ? .warning : .ok,
+            status: balance <= 0 || remainingPercent < 20 ? .warning : .ok,
             extras: [
                 "grantedBalance": "¥\(formatMoney(granted))",
                 "toppedUpBalance": "¥\(formatMoney(toppedUp))",
-                "remainingPercent": "\(max(0, 100 - usedPercent))"
+                "displayFullBalance": "¥\(formatMoney(fullBalance))",
+                "remainingPercent": "\(remainingPercent)"
             ]
         )
+    }
+
+    private func deepSeekFullBalance(from credentials: [String: String]) -> Decimal {
+        let raw = credentials["progressFullBalance"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let raw, let value = Decimal(string: raw), value > 0 else {
+            return 10
+        }
+        return value
     }
 
     private func decodeMiniMax(_ data: Data) throws -> APIBalanceSnapshot {

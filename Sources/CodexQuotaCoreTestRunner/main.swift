@@ -145,7 +145,8 @@ struct TestRunner {
         }
         """.utf8), providerID: .deepseek)
         expect(deepseek.balance == "¥12.50", "expected DeepSeek balance")
-        expect(deepseek.usedPercent == 17, "expected DeepSeek used percent")
+        expect(deepseek.usedPercent == 0, "expected DeepSeek to clamp balance over the default full reference")
+        expect(deepseek.extras["remainingPercent"] == "100", "expected DeepSeek remaining percent")
         expect(deepseek.extras["grantedBalance"] == "¥10.00", "expected DeepSeek granted balance")
         expect(deepseek.extras["toppedUpBalance"] == "¥5.00", "expected DeepSeek topped up balance")
 

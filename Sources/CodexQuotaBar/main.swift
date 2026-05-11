@@ -662,9 +662,8 @@ private struct APIBalanceRow: View {
         guard let snapshot = provider.lastSnapshot else { return "保存密钥后刷新余额" }
         switch provider.id {
         case .deepseek:
-            let used = snapshot.used ?? "--"
-            let total = snapshot.total ?? "--"
-            return "已用 \(used) / 总额 \(total)"
+            let full = snapshot.extras["displayFullBalance"] ?? snapshot.total ?? "¥10.00"
+            return "余额 \(snapshot.balance) / 满格 \(full)"
         case .minimax:
             let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
             let interval = "\(snapshot.extras["intervalUsed"] ?? "--")/\(snapshot.extras["intervalTotal"] ?? "--")"
@@ -1341,7 +1340,7 @@ private struct APIKeyProviderEditor: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-            ProgressView(value: Double(provider.lastSnapshot?.usedPercent ?? 0), total: 100)
+            ProgressView(value: Double(remainingPercent), total: 100)
                 .tint(Color(hex: provider.colorHex) ?? .accentColor)
             if let snapshot = provider.lastSnapshot {
                 APIProviderStatsView(providerID: provider.id, snapshot: snapshot)
@@ -1368,6 +1367,18 @@ private struct APIKeyProviderEditor: View {
         let total = snapshot.total.map { " / \($0)" } ?? ""
         return "已用 \(snapshot.usedPercent)%\(total)"
     }
+
+    private var remainingPercent: Int {
+        guard let snapshot = provider.lastSnapshot else { return 0 }
+        switch provider.id {
+        case .deepseek:
+            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        case .minimax:
+            return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        case .comfly:
+            return max(0, 100 - snapshot.usedPercent)
+        }
+    }
 }
 
 private struct APIProviderStatsView: View {
@@ -1378,8 +1389,7 @@ private struct APIProviderStatsView: View {
         VStack(alignment: .leading, spacing: 5) {
             switch providerID {
             case .deepseek:
-                stat("已用", snapshot.used ?? "--")
-                stat("总额度", snapshot.total ?? "--")
+                stat("满格参考", snapshot.extras["displayFullBalance"] ?? snapshot.total ?? "--")
                 stat("赠送", snapshot.extras["grantedBalance"] ?? "--")
                 stat("充值", snapshot.extras["toppedUpBalance"] ?? "--")
             case .minimax:

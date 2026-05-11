@@ -43,6 +43,14 @@ public final class FileAPIKeyConfigStore: APIKeyConfigStore, @unchecked Sendable
         for defaultProvider in APIKeyProviderConfig.defaults where !file.providers.contains(where: { $0.id == defaultProvider.id }) {
             file.providers.append(defaultProvider)
         }
+        for providerIndex in file.providers.indices {
+            guard let defaultProvider = APIKeyProviderConfig.defaults.first(where: { $0.id == file.providers[providerIndex].id }) else {
+                continue
+            }
+            for defaultField in defaultProvider.fields where !file.providers[providerIndex].fields.contains(where: { $0.key == defaultField.key }) {
+                file.providers[providerIndex].fields.append(defaultField)
+            }
+        }
         file.providers.sort { $0.id.rawValue < $1.id.rawValue }
     }
 
