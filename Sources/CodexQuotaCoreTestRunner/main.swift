@@ -175,6 +175,20 @@ struct TestRunner {
         """.utf8), providerID: .comfly)
         expect(comfly.balance == "B|1.00", "expected Comfly balance")
         expect(comfly.extras["balanceYuan"] == "¥1.20", "expected Comfly CNY estimate")
+
+        let comflyStringQuota = try provider.decodeBalance(data: Data("""
+        {"success": true, "data": {"quota": "500247", "used_quota": "500247.0"}}
+        """.utf8), providerID: .comfly)
+        expect(comflyStringQuota.balance == "B|1.00", "expected Comfly string quota to decode")
+
+        do {
+            _ = try provider.decodeBalance(data: Data("""
+            {"success": false, "message": "token invalid"}
+            """.utf8), providerID: .comfly)
+            expect(false, "expected Comfly provider error")
+        } catch APIBalanceError.provider(let message) {
+            expect(message == "token invalid", "expected Comfly provider message")
+        }
     }
 
     @MainActor

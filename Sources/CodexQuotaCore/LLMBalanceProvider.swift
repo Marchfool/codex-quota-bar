@@ -175,13 +175,25 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
     }
 
     private func decodeComfly(_ data: Data) throws -> APIBalanceSnapshot {
-        let response = try JSONDecoder().decode(ComflyBalanceResponse.self, from: data)
-        guard response.success else {
-            throw APIBalanceError.provider(response.message ?? "Comfly 查询失败")
+        let json: Any
+        do {
+            json = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw APIBalanceError.provider("Comfly 返回非 JSON 响应，请检查用户 ID、API Token 或接口是否变更")
+        }
+        guard let object = json as? [String: Any] else {
+            throw APIBalanceError.unsupportedSchema
+        }
+        let success = boolValue(object["success"]) ?? false
+        guard success else {
+            throw APIBalanceError.provider(stringValue(object["message"]) ?? stringValue(object["error"]) ?? "Comfly 查询失败")
+        }
+        guard let data = object["data"] as? [String: Any] else {
+            throw APIBalanceError.unsupportedSchema
         }
 
-        let quota = response.data.quota
-        let usedQuota = response.data.usedQuota
+        let quota = intValue(data["quota"]) ?? 0
+        let usedQuota = intValue(data["used_quota"]) ?? intValue(data["usedQuota"]) ?? 0
         let totalQuota = quota + usedQuota
         let balanceDisplay = Double(quota) / 500_247
         let balanceYuan = balanceDisplay * 1.2
@@ -204,6 +216,35 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
     private func formatMoney(_ value: Decimal) -> String {
         let number = value as NSDecimalNumber
         return String(format: "%.2f", number.doubleValue)
+    }
+
+    private func boolValue(_ value: Any?) -> Bool? {
+        if let value = value as? Bool { return value }
+        if let value = value as? Int { return value != 0 }
+        if let value = value as? Double { return value != 0 }
+        if let value = value as? String {
+            switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "ok", "success": return true
+            case "false", "0", "error", "fail": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? Double { return Int(value.rounded()) }
+        if let value = value as? String {
+            return Int(Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
+        }
+        return nil
+    }
+
+    private func stringValue(_ value: Any?) -> String? {
+        if let value = value as? String { return value }
+        if let value { return "\(value)" }
+        return nil
     }
 }
 
@@ -266,21 +307,5 @@ private struct MiniMaxModelRemain: Decodable {
         case currentIntervalTotalCount = "current_interval_total_count"
         case currentIntervalUsageCount = "current_interval_usage_count"
         case remainsTime = "remains_time"
-    }
-}
-
-private struct ComflyBalanceResponse: Decodable {
-    var success: Bool
-    var message: String?
-    var data: ComflyBalanceData
-}
-
-private struct ComflyBalanceData: Decodable {
-    var quota: Int
-    var usedQuota: Int
-
-    enum CodingKeys: String, CodingKey {
-        case quota
-        case usedQuota = "used_quota"
     }
 }
