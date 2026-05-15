@@ -144,7 +144,6 @@ public final class APIKeyManager: ObservableObject {
         if var existing {
             existing.status = .error
             existing.note = error.localizedDescription
-            existing.updatedAt = Date()
             return existing
         }
         return APIBalanceSnapshot(

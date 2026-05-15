@@ -81,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             height: PanelMetrics.height(
                 codexSlotCount: manager.slots.count,
                 apiProviderCount: apiKeyManager.providers.count,
-                hasError: manager.lastError != nil || apiKeyManager.lastError != nil
+                hasError: manager.lastError != nil
             )
         )
     }
@@ -287,7 +287,7 @@ private struct MonitorPanelView: View {
         PanelMetrics.height(
             codexSlotCount: manager.slots.count,
             apiProviderCount: apiKeyManager.providers.count,
-            hasError: manager.lastError != nil || apiKeyManager.lastError != nil
+            hasError: manager.lastError != nil
         )
     }
 
@@ -532,9 +532,6 @@ private struct APIBalanceSection: View {
                 }
             }
 
-            if let error = manager.lastError {
-                MessageStrip(text: error, systemImage: "exclamationmark.triangle.fill")
-            }
         }
         .padding(10)
         .background(
@@ -636,9 +633,6 @@ private struct APIBalanceRow: View {
 
     private var balanceText: String {
         guard let snapshot = provider.lastSnapshot else { return "未配置" }
-        if snapshot.status == .error {
-            return snapshot.note ?? "异常"
-        }
         if let balanceYuan = snapshot.extras["balanceYuan"] {
             return "\(snapshot.balance) · \(balanceYuan)"
         }
@@ -660,6 +654,9 @@ private struct APIBalanceRow: View {
 
     private var detailText: String {
         guard let snapshot = provider.lastSnapshot else { return "保存密钥后刷新余额" }
+        if snapshot.status == .error {
+            return "刷新失败，已保留上次余额"
+        }
         switch provider.id {
         case .deepseek:
             let full = snapshot.extras["displayFullBalance"] ?? snapshot.total ?? "¥10.00"
@@ -1363,6 +1360,9 @@ private struct APIKeyProviderEditor: View {
 
     private var detailText: String {
         guard let snapshot = provider.lastSnapshot else { return "保存后刷新余额" }
+        if snapshot.status == .error {
+            return "刷新失败，已保留上次余额"
+        }
         if let note = snapshot.note { return note }
         let total = snapshot.total.map { " / \($0)" } ?? ""
         return "已用 \(snapshot.usedPercent)%\(total)"
