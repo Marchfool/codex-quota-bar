@@ -249,6 +249,7 @@ struct TestRunner {
 
         expect(manager.slots[0].lastSnapshot?.remaining == 42, "stale refresh should keep previous quota")
         expect(manager.slots[0].lastSnapshot?.valueFreshness == .stale, "failed refresh should mark snapshot stale")
+        expect(manager.lastError == nil, "transient refresh failures with existing data should not surface global errors")
     }
 
     static func persistedSnapshotDoesNotContainSecrets() throws {

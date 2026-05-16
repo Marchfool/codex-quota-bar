@@ -97,20 +97,25 @@ public final class QuotaManager: ObservableObject {
         defer { isRefreshing = false }
 
         var updated: [AccountSlot] = []
+        var surfacedError: String?
         for var slot in slots where slot.isActive {
             do {
                 let snapshot = try await provider.fetchQuota(for: slot)
                 slot.lastSnapshot = snapshot
                 slot.lastSeenAt = Date()
             } catch {
-                slot.lastSnapshot = staleSnapshot(from: slot.lastSnapshot, accountLabel: slot.displayName, error: error)
-                lastError = error.localizedDescription
+                let existing = slot.lastSnapshot
+                slot.lastSnapshot = staleSnapshot(from: existing, accountLabel: slot.displayName, error: error)
+                if shouldSurfaceRefreshError(error, existing: existing) {
+                    surfacedError = error.localizedDescription
+                }
             }
             updated.append(slot)
         }
 
         let inactive = slots.filter { !$0.isActive }
         slots = updated + inactive
+        lastError = surfacedError
         try? persist()
     }
 
@@ -153,10 +158,11 @@ public final class QuotaManager: ObservableObject {
     private func staleSnapshot(from existing: QuotaSnapshot?, accountLabel: String, error: Error) -> QuotaSnapshot {
         if var existing {
             existing.fetchHealth = error.isAuthError ? .authError : .stale
-            existing.status = error.isAuthError ? .error : existing.status
+            if error.isAuthError {
+                existing.status = .error
+                existing.note = error.localizedDescription
+            }
             existing.valueFreshness = .stale
-            existing.note = error.localizedDescription
-            existing.updatedAt = Date()
             return existing
         }
 
@@ -171,6 +177,10 @@ public final class QuotaManager: ObservableObject {
             used: 0,
             valueFreshness: .stale
         )
+    }
+
+    private func shouldSurfaceRefreshError(_ error: Error, existing: QuotaSnapshot?) -> Bool {
+        existing == nil || error.isAuthError
     }
 
     private func shouldUseAIPlanMonitorFallback(_ slots: [AccountSlot]) -> Bool {
