@@ -447,7 +447,9 @@ private struct SlotDashboardCard: View {
                 StatusPill(snapshot: slot.lastSnapshot)
             }
 
-            if let snapshot = slot.lastSnapshot, !snapshot.quotaWindows.isEmpty {
+            if let snapshot = slot.lastSnapshot, snapshot.fetchHealth == .authError {
+                MessageStrip(text: "Codex 登录已过期，请点“导入”重新读取当前 Codex 登录。", systemImage: "person.crop.circle.badge.exclamationmark")
+            } else if let snapshot = slot.lastSnapshot, !snapshot.quotaWindows.isEmpty {
                 ForEach(snapshot.quotaWindows) { window in
                     WindowMeter(window: window)
                 }
@@ -1046,6 +1048,7 @@ private struct StatusPill: View {
 
     private var text: String {
         guard let snapshot else { return "等待中" }
+        if snapshot.fetchHealth == .authError { return "需重新登录" }
         if snapshot.valueFreshness == .stale { return "过期" }
         switch snapshot.status {
         case .ok: return "正常"
@@ -1057,6 +1060,7 @@ private struct StatusPill: View {
 
     private var color: Color {
         guard let snapshot else { return .secondary }
+        if snapshot.fetchHealth == .authError { return .red }
         if snapshot.valueFreshness == .stale { return .orange }
         switch snapshot.status {
         case .ok: return .green

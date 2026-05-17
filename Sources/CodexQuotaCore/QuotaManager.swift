@@ -29,8 +29,11 @@ public final class QuotaManager: ObservableObject {
     }
 
     public var primaryRemaining: Int? {
-        let sessionValues = slots.compactMap { slot in
-            slot.lastSnapshot?.quotaWindows.first(where: { $0.kind == .session })?.remainingPercent
+        let sessionValues = slots.compactMap { slot -> Int? in
+            guard let snapshot = slot.lastSnapshot, snapshot.fetchHealth != .authError, snapshot.status != .error else {
+                return nil
+            }
+            return snapshot.quotaWindows.first(where: { $0.kind == .session })?.remainingPercent
         }
         if let lowestSession = sessionValues.min() {
             return lowestSession
@@ -51,7 +54,9 @@ public final class QuotaManager: ObservableObject {
     }
 
     public var compactStatusBarTitle: String {
-        let windows = slots.compactMap(\.lastSnapshot).flatMap(\.quotaWindows)
+        let windows = slots.compactMap(\.lastSnapshot)
+            .filter { $0.fetchHealth != .authError && $0.status != .error }
+            .flatMap(\.quotaWindows)
         let session = windows.first(where: { $0.kind == .session })?.remainingPercent
         let weekly = windows.first(where: { $0.kind == .weekly })?.remainingPercent
 
@@ -68,7 +73,7 @@ public final class QuotaManager: ObservableObject {
     }
 
     public var hasWarning: Bool {
-        (primaryRemaining ?? 100) < 20 || slots.contains { $0.lastSnapshot?.status == .error }
+        (primaryRemaining ?? 100) < 20 || slots.contains { $0.lastSnapshot?.fetchHealth == .authError }
     }
 
     public func load() {

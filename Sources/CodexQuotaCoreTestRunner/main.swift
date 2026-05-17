@@ -12,6 +12,7 @@ struct TestRunner {
         formattersUseReadableChineseUpdatedText()
         await lowestRemainingUsesTightestAccount()
         await statusBarPrefersSessionWindow()
+        authErrorDoesNotDriveStatusBar()
         await refreshFailureKeepsStaleSnapshot()
         try persistedSnapshotDoesNotContainSecrets()
         try profileStoreDoesNotPersistAuthJSON()
@@ -250,6 +251,35 @@ struct TestRunner {
         expect(manager.slots[0].lastSnapshot?.remaining == 42, "stale refresh should keep previous quota")
         expect(manager.slots[0].lastSnapshot?.valueFreshness == .stale, "failed refresh should mark snapshot stale")
         expect(manager.lastError == nil, "transient refresh failures with existing data should not surface global errors")
+    }
+
+    @MainActor
+    static func authErrorDoesNotDriveStatusBar() {
+        let authSnapshot = QuotaSnapshot(
+            accountLabel: "user@example.com",
+            fetchHealth: .authError,
+            note: "Codex 登录已过期或未授权。",
+            quotaWindows: [
+                QuotaWindow(id: "session", kind: .session, remainingPercent: 100, title: "5h", usedPercent: 0),
+                QuotaWindow(id: "weekly", kind: .weekly, remainingPercent: 100, title: "Weekly", usedPercent: 0)
+            ],
+            remaining: 100,
+            status: .error,
+            used: 0,
+            valueFreshness: .stale
+        )
+        let manager = QuotaManager(
+            store: MemorySlotStore(file: SlotFile(slots: [
+                AccountSlot(slotID: "A", accountKey: "key", displayName: "user@example.com", lastSnapshot: authSnapshot)
+            ])),
+            provider: StaticProvider(snapshot: snapshot(remaining: 50)),
+            importer: CodexAuthImporter(secretStore: MemorySecretStore())
+        )
+
+        manager.load()
+        expect(manager.statusBarTitle == "Codex --", "auth errors should not pretend quota is 100%")
+        expect(manager.compactStatusBarTitle == "--", "compact title should hide auth-error percentages")
+        expect(manager.hasWarning, "auth errors should still surface as warning state")
     }
 
     static func persistedSnapshotDoesNotContainSecrets() throws {

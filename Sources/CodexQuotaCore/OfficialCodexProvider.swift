@@ -14,15 +14,15 @@ public enum ProviderError: Error, LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .missingCredential:
-            return "No Codex credential is stored for this slot."
+            return "没有可用的 Codex 登录凭据。"
         case .unauthorized:
-            return "Codex credential is expired or unauthorized."
+            return "Codex 登录已过期或未授权。"
         case .rateLimited:
-            return "Codex quota endpoint is rate limited."
+            return "Codex 额度接口暂时被限流。"
         case .unsupportedSchema:
-            return "Codex quota response did not match the expected schema."
+            return "Codex 额度接口返回格式已变化。"
         case .server(let code):
-            return "Codex quota endpoint returned HTTP \(code)."
+            return "Codex 额度接口返回 HTTP \(code)。"
         }
     }
 }
