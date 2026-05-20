@@ -384,7 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if desktopWidgetWindow == nil {
             let cornerRadius: CGFloat = 28
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 540),
+                contentRect: NSRect(x: 0, y: 0, width: 396, height: 596),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -406,7 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 396, y: screenFrame.maxY - 570))
+            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 412, y: screenFrame.maxY - 626))
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
@@ -1591,6 +1591,8 @@ private struct FloatingDesktopWidgetView: View {
                 )
 
                 VStack(alignment: .leading, spacing: 8) {
+                    floatingHeader
+
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(manager.slots) { slot in
@@ -1665,16 +1667,52 @@ private struct FloatingDesktopWidgetView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.top, 8)
+                .padding(.top, 10)
                 .padding(.bottom, 10)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .frame(width: 380, height: 540)
+        .frame(width: 396, height: 596)
         .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.10), lineWidth: 0.8))
         .shadow(color: .black.opacity(0.42), radius: 18, y: 10)
         .preferredColorScheme(.dark)
+    }
+
+    private var floatingHeader: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(red: 0.00, green: 0.82, blue: 0.95))
+                .frame(width: 7, height: 7)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("订阅余额")
+                    .font(.custom("Avenir Next Demi Bold", size: 12))
+                    .tracking(0.15)
+                    .foregroundStyle(.white.opacity(0.94))
+                Text(floatingStatusSubtitle)
+                    .font(.custom("Avenir Next Medium", size: 8.5))
+                    .foregroundStyle(.white.opacity(0.46))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Text(RuntimeDiagnostics.buildLine)
+                .font(.custom("Avenir Next Medium", size: 8))
+                .foregroundStyle(.white.opacity(0.34))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 138, alignment: .trailing)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+    }
+
+    private var floatingStatusSubtitle: String {
+        if manager.isRefreshing || apiKeyManager.isRefreshing { return "正在刷新..." }
+        if manager.slots.isEmpty { return "尚未导入账号" }
+        return "5小时与周额度实时监控"
     }
 
     private func floatingSection<Content: View>(
@@ -2313,8 +2351,8 @@ private enum MainCardGrid {
 
 private enum FloatingCardGrid {
     static let titleColumnWidth: CGFloat = 36
-    static let valueColumnWidth: CGFloat = 92
-    static let meterColumnWidth: CGFloat = 118
+    static let valueColumnWidth: CGFloat = 100
+    static let meterColumnWidth: CGFloat = 124
     static let meterLabelWidth: CGFloat = 26
     static let percentColumnWidth: CGFloat = 32
 }
