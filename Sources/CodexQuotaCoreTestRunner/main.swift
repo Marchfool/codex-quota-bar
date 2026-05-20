@@ -13,10 +13,18 @@ struct TestRunner {
         await lowestRemainingUsesTightestAccount()
         await statusBarPrefersSessionWindow()
         authErrorDoesNotDriveStatusBar()
+        claudeStatusBarValueUsesFiveHourWindow()
         await refreshFailureKeepsStaleSnapshot()
         try persistedSnapshotDoesNotContainSecrets()
         try profileStoreDoesNotPersistAuthJSON()
+        try codexCredentialFingerprintIgnoresTokenRotation()
         try apiKeyStoreDoesNotPersistSecureValues()
+        await launchRefreshSkipsSecureProviderReads()
+        await launchRefreshUsesNonInteractiveSecretReads()
+        copyAvailabilityUsesSnapshotsOnly()
+        await claudeAutoRefreshRequiresManualRefresh()
+        claudeErrorSnapshotsAreActionable()
+        markedReadyPreservesExistingMetrics()
         print("All CodexQuotaCore tests passed.")
     }
 
@@ -174,13 +182,43 @@ struct TestRunner {
         let comfly = try provider.decodeBalance(data: Data("""
         {"success": true, "data": {"quota": 500247, "used_quota": 500247}}
         """.utf8), providerID: .comfly)
-        expect(comfly.balance == "B|1.00", "expected Comfly balance")
-        expect(comfly.extras["balanceYuan"] == "¥1.20", "expected Comfly CNY estimate")
+        expect(comfly.balance == "¥1.20", "expected Comfly balance")
+        expect(comfly.extras["balanceYuan"] == "¥1.20", "expected Comfly balance display")
+        expect(comfly.extras["displayFullBalance"] == "¥2.40", "expected Comfly full balance reference")
+        expect(comfly.extras["tokenBalance"] == "1.00", "expected Comfly token balance")
 
         let comflyStringQuota = try provider.decodeBalance(data: Data("""
         {"success": true, "data": {"quota": "500247", "used_quota": "500247.0"}}
         """.utf8), providerID: .comfly)
-        expect(comflyStringQuota.balance == "B|1.00", "expected Comfly string quota to decode")
+        expect(comflyStringQuota.balance == "¥1.20", "expected Comfly string quota to decode")
+
+        let claude = try provider.decodeBalance(data: Data("""
+        {
+          "organizations": [
+            {
+              "rate_limit_tier": "pro",
+              "billing": {"status": "active", "period": "monthly"}
+            }
+          ],
+          "usage": {
+            "five_hour": {"utilization": 83, "resets_at": "2026-05-21T02:18:00Z"},
+            "seven_day": {"utilization": 19, "resets_at": "2026-05-21T22:00:00Z"},
+            "seven_day_omelette": {"utilization": 8, "resets_at": "2026-05-21T22:00:00Z"}
+          },
+          "limits": {
+            "weekly_limits": [
+              {"name": "All models", "utilization": 19, "reset_at": "2026-05-21T22:00:00Z"},
+              {"name": "Claude Design", "utilization": 0, "reset_at": "2026-05-21T22:00:00Z", "description": "You haven’t used Claude Design yet"}
+            ]
+          }
+        }
+        """.utf8), providerID: .claude)
+        expect(claude.extras["designUsed"] == "8", "expected Claude Design usage to prefer structured usage")
+        expect(claude.extras["designResetsAt"] == "2026-05-21T22:00:00Z", "expected Claude Design reset time")
+        expect(
+            claude.extras["designNote"] == nil || claude.extras["designNote"] == "You haven’t used Claude Design yet",
+            "expected Claude Design note compatibility"
+        )
 
         do {
             _ = try provider.decodeBalance(data: Data("""
@@ -190,6 +228,34 @@ struct TestRunner {
         } catch APIBalanceError.provider(let message) {
             expect(message == "token invalid", "expected Comfly provider message")
         }
+    }
+
+    static func claudeErrorSnapshotsAreActionable() {
+        let notInstalled = ClaudeFetchError.notInstalled.snapshot
+        expect(notInstalled.setupState == .notInstalled, "expected Claude install error classification")
+        expect(notInstalled.errorCode == "claude_not_installed", "expected Claude install error code")
+        expect(notInstalled.actionHint == "安装 Claude Desktop 并完成登录后刷新", "expected Claude install hint")
+
+        let missingDependency = ClaudeFetchError.cryptographyMissing.snapshot
+        expect(missingDependency.setupState == .missingDependency, "expected dependency classification")
+        expect(missingDependency.errorCode == "python_cryptography_missing", "expected dependency error code")
+
+        let notLoggedIn = ClaudeFetchError.notLoggedIn.snapshot
+        expect(notLoggedIn.setupState == .notLoggedIn, "expected login classification")
+        expect(notLoggedIn.actionHint == "打开 Claude Desktop 并确认已登录 claude.ai", "expected Claude login hint")
+    }
+
+    static func markedReadyPreservesExistingMetrics() {
+        let snapshot = APIBalanceSnapshot(
+            balance: "Pro",
+            usedPercent: 42,
+            status: .warning,
+            extras: ["fiveHourUsed": "42"]
+        ).markedReady(actionHint: "已同步")
+
+        expect(snapshot.setupState == .ready, "expected ready state")
+        expect(snapshot.actionHint == "已同步", "expected ready hint")
+        expect(snapshot.extras["fiveHourUsed"] == "42", "expected existing metrics to survive")
     }
 
     @MainActor
@@ -211,12 +277,13 @@ struct TestRunner {
 
     @MainActor
     static func statusBarPrefersSessionWindow() async {
+        let sessionResetAt = DateCoding.parseISO8601("2026-05-10T08:40:50Z")
         let snapshot = QuotaSnapshot(
             accountLabel: "user@example.com",
             fetchHealth: .ok,
             note: "Plan plus | 5h 99% | Weekly 0%",
             quotaWindows: [
-                QuotaWindow(id: "session", kind: .session, remainingPercent: 99, title: "5h", usedPercent: 1),
+                QuotaWindow(id: "session", kind: .session, remainingPercent: 99, resetAt: sessionResetAt, title: "5h", usedPercent: 1),
                 QuotaWindow(id: "weekly", kind: .weekly, remainingPercent: 0, title: "Weekly", usedPercent: 100)
             ],
             remaining: 0,
@@ -233,6 +300,8 @@ struct TestRunner {
         )
 
         manager.load()
+        expect(manager.sessionRemaining == 99, "session remaining should prefer 5h/session window")
+        expect(manager.sessionResetAt == sessionResetAt, "session reset should come from 5h/session window")
         expect(manager.statusBarTitle == "Codex 99%", "status bar should prefer 5h/session window over weekly minimum")
     }
 
@@ -279,7 +348,37 @@ struct TestRunner {
         manager.load()
         expect(manager.statusBarTitle == "Codex --", "auth errors should not pretend quota is 100%")
         expect(manager.compactStatusBarTitle == "--", "compact title should hide auth-error percentages")
+        expect(manager.sessionRemaining == nil, "session title should hide auth-error percentages")
         expect(manager.hasWarning, "auth errors should still surface as warning state")
+    }
+
+    @MainActor
+    static func claudeStatusBarValueUsesFiveHourWindow() {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = providers[index].id == .claude
+            if providers[index].id == .claude {
+                providers[index].lastSnapshot = APIBalanceSnapshot(
+                    balance: "Claude Pro",
+                    usedPercent: 92,
+                    extras: [
+                        "fiveHourUsed": "25",
+                        "fiveHourResetsAt": "2026-05-21T02:18:00Z",
+                        "sevenDayUsed": "92"
+                    ]
+                ).markedReady()
+            }
+        }
+
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: MemorySecretStore(),
+            balanceProvider: CountingBalanceProvider()
+        )
+
+        manager.load()
+        expect(manager.claudeFiveHourRemaining == 75, "Claude menu bar value should use fiveHourUsed, not weekly or headline usage")
+        expect(manager.claudeFiveHourResetAt == DateCoding.parseISO8601("2026-05-21T02:18:00Z"), "Claude menu bar reset should use fiveHourResetsAt")
     }
 
     static func persistedSnapshotDoesNotContainSecrets() throws {
@@ -320,6 +419,30 @@ struct TestRunner {
         expect(!text.contains("id_token"), "profile should not contain id token")
     }
 
+    static func codexCredentialFingerprintIgnoresTokenRotation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = directory.appendingPathComponent("auth.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let idToken = try makeJWT(
+            email: "user@example.com",
+            subject: "subject-123",
+            clientID: "client-123",
+            accountID: "acct-123"
+        )
+        let importer = CodexAuthImporter(authURL: url, secretStore: MemorySecretStore())
+
+        try makeCodexAuthJSON(accessToken: "access-one", refreshToken: "refresh-one", idToken: idToken, accountID: "acct-123")
+            .write(to: url, atomically: true, encoding: .utf8)
+        let first = try importer.currentCredentialFingerprint()
+
+        try makeCodexAuthJSON(accessToken: "access-two", refreshToken: "refresh-two", idToken: idToken, accountID: "acct-123")
+            .write(to: url, atomically: true, encoding: .utf8)
+        let second = try importer.currentCredentialFingerprint()
+
+        expect(first == second, "token rotation should not force a startup keychain re-import")
+    }
+
     static func apiKeyStoreDoesNotPersistSecureValues() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("api_keys.json")
@@ -331,6 +454,127 @@ struct TestRunner {
         let text = try String(contentsOf: url)
         expect(!text.contains("sk-secret-value"), "API key config should not persist secure values")
         expect(text.contains("deepseek"), "API key config should include default providers")
+    }
+
+    @MainActor
+    static func launchRefreshSkipsSecureProviderReads() async {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = true
+            providers[index].lastSnapshot = nil
+        }
+
+        let balanceProvider = CountingBalanceProvider()
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: MemorySecretStore(),
+            balanceProvider: balanceProvider
+        )
+        let claudeFetchCounter = Counter()
+        manager.claudeFetcher = {
+            await claudeFetchCounter.increment()
+            return APIBalanceSnapshot(balance: "Claude", usedPercent: 0)
+        }
+
+        manager.load()
+        await manager.refreshAll(trigger: .launch)
+
+        let requestedProviders = await balanceProvider.requestedProviderIDs()
+        let claudeFetchCount = await claudeFetchCounter.value()
+        expect(requestedProviders.isEmpty, "launch refresh should skip secure providers without a ready snapshot")
+        expect(claudeFetchCount == 0, "launch refresh should not immediately read Claude Safe Storage")
+    }
+
+    @MainActor
+    static func launchRefreshUsesNonInteractiveSecretReads() async {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = providers[index].id == .deepseek
+            if providers[index].id == .deepseek {
+                providers[index].lastSnapshot = APIBalanceSnapshot(balance: "DeepSeek", usedPercent: 10).markedReady()
+            }
+        }
+
+        let secretStore = RecordingSecretStore(values: [
+            APISecretAccount.field(providerID: .deepseek, key: "apiKey"): "sk-test"
+        ])
+        let balanceProvider = CountingBalanceProvider()
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: secretStore,
+            balanceProvider: balanceProvider
+        )
+
+        manager.load()
+        await manager.refreshAll(trigger: .launch)
+
+        let reads = secretStore.recordedReads()
+        expect(reads.count == 1, "launch refresh should read one secure field")
+        expect(reads.first?.0 == APISecretAccount.field(providerID: .deepseek, key: "apiKey"), "launch refresh should read the DeepSeek key")
+        expect(reads.first?.1 == false, "launch refresh should not allow keychain UI")
+        let requestedProviders = await balanceProvider.requestedProviderIDs()
+        expect(requestedProviders == [.deepseek], "ready secure providers should still refresh when non-interactive access succeeds")
+    }
+
+    @MainActor
+    static func copyAvailabilityUsesSnapshotsOnly() {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = providers[index].id == .deepseek
+            if providers[index].id == .deepseek {
+                providers[index].lastSnapshot = APIBalanceSnapshot(balance: "DeepSeek", usedPercent: 10).markedReady()
+            }
+        }
+
+        let secretStore = RecordingSecretStore()
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: secretStore,
+            balanceProvider: CountingBalanceProvider()
+        )
+
+        manager.load()
+        expect(manager.canCopyPrimaryValue(providerID: .deepseek), "copy affordance should use cached setup state")
+        expect(secretStore.recordedReads().isEmpty, "copy affordance should not read keychain secrets")
+    }
+
+    @MainActor
+    static func claudeAutoRefreshRequiresManualRefresh() async {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = providers[index].id == .claude
+            if providers[index].id == .claude {
+                providers[index].lastSnapshot = APIBalanceSnapshot(
+                    balance: "Claude Pro",
+                    usedPercent: 12
+                ).markedReady(actionHint: "已同步")
+            }
+        }
+
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: MemorySecretStore(),
+            balanceProvider: CountingBalanceProvider()
+        )
+        let claudeFetchCounter = Counter()
+        manager.claudeFetcher = {
+            await claudeFetchCounter.increment()
+            return APIBalanceSnapshot(balance: "Claude Pro", usedPercent: 10)
+        }
+
+        manager.load()
+        await manager.refreshAll(trigger: .launch)
+
+        let claudeFetchCount = await claudeFetchCounter.value()
+        expect(claudeFetchCount == 0, "Claude launch refresh should stay manual-only to avoid boot-time keychain prompts")
+
+        await manager.refreshAll(trigger: .polling)
+        let backgroundFetchCount = await claudeFetchCounter.value()
+        expect(backgroundFetchCount == 0, "Claude polling refresh should stay manual-only to avoid background keychain prompts")
+
+        await manager.refreshProvider(.claude, trigger: .manual)
+        let manualFetchCount = await claudeFetchCounter.value()
+        expect(manualFetchCount == 1, "Claude manual refresh should still work")
     }
 
     static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -361,6 +605,40 @@ private func snapshot(remaining: Int) -> QuotaSnapshot {
         status: remaining < 20 ? .warning : .ok,
         used: 100 - remaining
     )
+}
+
+private func makeCodexAuthJSON(accessToken: String, refreshToken: String, idToken: String, accountID: String) throws -> String {
+    let object: [String: Any] = [
+        "auth_mode": "chatgpt",
+        "tokens": [
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "id_token": idToken,
+            "account_id": accountID
+        ]
+    ]
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    return String(data: data, encoding: .utf8) ?? "{}"
+}
+
+private func makeJWT(email: String, subject: String, clientID: String, accountID: String) throws -> String {
+    let headerData = try JSONSerialization.data(withJSONObject: ["alg": "none"], options: [.sortedKeys])
+    let payloadData = try JSONSerialization.data(withJSONObject: [
+        "client_id": clientID,
+        "email": email,
+        "sub": subject,
+        "https://api.openai.com/auth": [
+            "chatgpt_account_id": accountID
+        ]
+    ], options: [.sortedKeys])
+    return "\(base64URL(headerData)).\(base64URL(payloadData)).signature"
+}
+
+private func base64URL(_ data: Data) -> String {
+    data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
 }
 
 private final class MemorySlotStore: SlotStore, @unchecked Sendable {
@@ -395,6 +673,52 @@ private final class MemorySecretStore: SecretStore, @unchecked Sendable {
     }
 }
 
+private final class RecordingSecretStore: SecretStore, @unchecked Sendable {
+    private var values: [String: String]
+    private var reads: [(String, Bool)] = []
+
+    init(values: [String: String] = [:]) {
+        self.values = values
+    }
+
+    func set(_ value: String, account: String) throws {
+        values[account] = value
+    }
+
+    func get(account: String) throws -> String? {
+        try get(account: account, allowsUserInteraction: true)
+    }
+
+    func get(account: String, allowsUserInteraction: Bool) throws -> String? {
+        reads.append((account, allowsUserInteraction))
+        return values[account]
+    }
+
+    func delete(account: String) throws {
+        values.removeValue(forKey: account)
+    }
+
+    func recordedReads() -> [(String, Bool)] {
+        reads
+    }
+}
+
+private final class MemoryAPIKeyConfigStore: APIKeyConfigStore, @unchecked Sendable {
+    var file: APIKeyConfigFile
+
+    init(file: APIKeyConfigFile) {
+        self.file = file
+    }
+
+    func load() throws -> APIKeyConfigFile {
+        file
+    }
+
+    func save(_ file: APIKeyConfigFile) throws {
+        self.file = file
+    }
+}
+
 private struct StaticProvider: CodexQuotaProvider {
     var snapshot: QuotaSnapshot
 
@@ -406,5 +730,30 @@ private struct StaticProvider: CodexQuotaProvider {
 private struct FailingProvider: CodexQuotaProvider {
     func fetchQuota(for slot: AccountSlot) async throws -> QuotaSnapshot {
         throw ProviderError.rateLimited
+    }
+}
+
+private actor CountingBalanceProvider: APIBalanceProvider {
+    private var providerIDs: [APIKeyProviderID] = []
+
+    func fetchBalance(for config: APIKeyProviderConfig, credentials: [String : String]) async throws -> APIBalanceSnapshot {
+        providerIDs.append(config.id)
+        return APIBalanceSnapshot(balance: config.displayName, usedPercent: 0)
+    }
+
+    func requestedProviderIDs() -> [APIKeyProviderID] {
+        providerIDs
+    }
+}
+
+private actor Counter {
+    private var count = 0
+
+    func increment() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
     }
 }

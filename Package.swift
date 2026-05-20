@@ -16,6 +16,7 @@ let package = Package(
             name: "CodexQuotaCore",
             linkerSettings: [
                 .linkedFramework("Foundation"),
+                .linkedFramework("LocalAuthentication"),
                 .linkedFramework("Security"),
                 .linkedFramework("ServiceManagement")
             ]

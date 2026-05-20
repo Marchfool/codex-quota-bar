@@ -31,7 +31,7 @@ CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打�
 ```sh
 make build
 make test
-make app
+CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" make app
 ```
 
 The app bundle is written to:
@@ -53,28 +53,36 @@ The API key config file stores provider templates, non-secret fields, and the la
 
 `codex_profiles.json` is designed to be metadata-only. Keep it private anyway because it still identifies local accounts.
 
-If you have a Developer ID certificate, build with a stable signing identity to reduce repeated macOS Keychain prompts:
+Use a stable signing identity every time you bundle the app. Re-signing with a different identity, or launching a transient build product directly, can make macOS ask for Keychain access again.
 
 ```sh
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make dmg
 ```
 
+For local-only usage on one Mac, a fixed self-signed or Apple Development identity is enough. The important part is that the identity stays the same across rebuilds.
+
 ## Install
 
 ```sh
-make app
-cp -R .build/CodexQuotaBar.app /Applications/
-open /Applications/CodexQuotaBar.app
+CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/install-app.sh release
 ```
 
 Or build a DMG installer:
 
 ```sh
-make dmg
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" make dmg
 open .build/CodexQuotaBar.dmg
 ```
 
 Then drag `CodexQuotaBar.app` into `Applications`.
+
+For day-to-day use, always launch `/Applications/CodexQuotaBar.app`. Avoid mixing these entrypoints unless you are debugging:
+
+- `/Applications/CodexQuotaBar.app`
+- `.build/CodexQuotaBar.app`
+- `.build/debug/CodexQuotaBar`
+
+Mixing them gives macOS different executable identities and is a common cause of repeated Keychain prompts.
 
 If macOS blocks the unsigned app, open **System Settings -> Privacy & Security** and allow it, or run:
 
@@ -82,6 +90,15 @@ If macOS blocks the unsigned app, open **System Settings -> Privacy & Security**
 xattr -dr com.apple.quarantine /Applications/CodexQuotaBar.app
 open /Applications/CodexQuotaBar.app
 ```
+
+If you were already seeing repeated Keychain prompts, do a one-time cleanup before reinstalling:
+
+```sh
+rm -rf /Applications/CodexQuotaBar.app
+CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/install-app.sh release
+```
+
+If macOS still prompts on the first launch after reinstalling, allow it once. If you later change signing identity again, macOS may ask one more time because the app now looks like a different signer.
 
 ## Desktop widget
 

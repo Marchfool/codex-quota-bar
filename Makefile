@@ -1,4 +1,4 @@
-.PHONY: build test app dmg run clean
+.PHONY: build test app install dmg run clean
 
 build:
 	swift build
@@ -9,11 +9,14 @@ test:
 app:
 	./scripts/bundle-app.sh release
 
+install:
+	./scripts/install-app.sh release
+
 dmg:
 	./scripts/create-dmg.sh release
 
 run:
-	swift run CodexQuotaBar
+	./build_and_run.sh
 
 clean:
 	rm -rf .build

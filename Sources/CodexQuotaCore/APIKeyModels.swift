@@ -4,12 +4,14 @@ public enum APIKeyProviderID: String, Codable, CaseIterable, Sendable {
     case deepseek
     case minimax
     case comfly
+    case claude
 
     public var displayName: String {
         switch self {
         case .deepseek: return "DeepSeek"
         case .minimax: return "MiniMax"
         case .comfly: return "Comfly"
+        case .claude: return "Claude"
         }
     }
 
@@ -18,6 +20,7 @@ public enum APIKeyProviderID: String, Codable, CaseIterable, Sendable {
         case .deepseek: return "#2563EB"
         case .minimax: return "#7C3AED"
         case .comfly: return "#F59E0B"
+        case .claude: return "#E05A2B"
         }
     }
 }
@@ -87,12 +90,34 @@ public struct APIKeyProviderConfig: Codable, Equatable, Identifiable, Sendable {
                 displayName: APIKeyProviderID.comfly.displayName,
                 colorHex: APIKeyProviderID.comfly.colorHex,
                 fields: [
-                    APIKeyField(key: "userId", label: "用户 ID", placeholder: "New-API-User", isSecure: false),
+                    APIKeyField(key: "userId", label: "用户 ID", placeholder: "数字用户 ID（New-API-User）", isSecure: false),
                     APIKeyField(key: "token", label: "API Token", placeholder: "sk-...", isSecure: true)
                 ]
+            ),
+            APIKeyProviderConfig(
+                id: .claude,
+                displayName: APIKeyProviderID.claude.displayName,
+                colorHex: APIKeyProviderID.claude.colorHex,
+                fields: []
             )
         ]
     }
+}
+
+public extension APIKeyProviderConfig {
+    var hasSecureFields: Bool {
+        fields.contains(where: \.isSecure)
+    }
+
+    var hasReadySnapshot: Bool {
+        lastSnapshot?.setupState == .ready
+    }
+}
+
+public enum APIRefreshTrigger: String, Codable, Sendable {
+    case launch
+    case polling
+    case manual
 }
 
 public struct APIBalanceSnapshot: Codable, Equatable, Sendable {

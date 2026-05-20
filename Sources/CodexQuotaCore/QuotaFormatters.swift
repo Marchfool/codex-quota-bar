@@ -44,4 +44,72 @@ public enum QuotaFormatters {
     public static func percentText(_ value: Int) -> String {
         "\(min(100, max(0, value)))%"
     }
+
+    public static func absoluteResetText(_ date: Date?, now: Date = Date()) -> String {
+        guard let date else { return "重置时间 --" }
+        let calendar = Calendar.current
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = Locale(identifier: "zh_CN")
+        timeFormatter.dateFormat = "HH:mm"
+
+        if calendar.isDateInToday(date) {
+            return "今天 \(timeFormatter.string(from: date)) 重置"
+        }
+        if calendar.isDateInTomorrow(date) {
+            return "明天 \(timeFormatter.string(from: date)) 重置"
+        }
+
+        let weekdayFormatter = DateFormatter()
+        weekdayFormatter.locale = Locale(identifier: "zh_CN")
+        weekdayFormatter.dateFormat = "E HH:mm"
+        return "\(weekdayFormatter.string(from: date)) 重置"
+    }
+
+    public static func remainingDurationText(_ date: Date?, now: Date = Date()) -> String {
+        guard let date else { return "剩余时间 --" }
+        let remaining = max(0, Int(date.timeIntervalSince(now)))
+        if remaining < 60 {
+            return "\(remaining)秒"
+        }
+
+        let days = remaining / 86_400
+        let hours = (remaining % 86_400) / 3_600
+        let minutes = (remaining % 3_600) / 60
+
+        if days > 0 {
+            if hours > 0 {
+                return "\(days)天\(hours)小时"
+            }
+            return "\(days)天"
+        }
+
+        if hours > 0 {
+            if minutes > 0 {
+                return "\(hours)小时\(minutes)分"
+            }
+            return "\(hours)小时"
+        }
+
+        return "\(minutes)分"
+    }
+
+    public static func compactRemainingDurationText(_ date: Date?, now: Date = Date()) -> String {
+        guard let date else { return "--" }
+        let remaining = max(0, Int(date.timeIntervalSince(now)))
+        if remaining < 60 {
+            return "\(remaining)秒"
+        }
+
+        let days = remaining / 86_400
+        let hours = (remaining % 86_400) / 3_600
+        let minutes = (remaining % 3_600) / 60
+
+        if days > 0 {
+            return "\(days)天"
+        }
+        if hours > 0 {
+            return "\(hours)小时"
+        }
+        return "\(minutes)分"
+    }
 }

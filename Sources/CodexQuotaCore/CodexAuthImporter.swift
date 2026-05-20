@@ -45,6 +45,22 @@ public final class CodexAuthImporter: @unchecked Sendable {
         self.profileStore = profileStore
     }
 
+    public func currentCredentialFingerprint() throws -> String? {
+        guard FileManager.default.fileExists(atPath: authURL.path) else {
+            return nil
+        }
+
+        let data = try Data(contentsOf: authURL)
+        guard let authJSON = String(data: data, encoding: .utf8) else {
+            throw CodexAuthImportError.unsupportedAuthFile
+        }
+        let auth = try JSONDecoder().decode(CodexAuthFile.self, from: data)
+        guard auth.authMode == "chatgpt", let tokens = auth.tokens else {
+            throw CodexAuthImportError.unsupportedAuthFile
+        }
+        return Self.credentialFingerprint(for: tokens, authJSON: authJSON)
+    }
+
     public func importCurrentAccount() throws -> ImportedCodexCredential {
         guard FileManager.default.fileExists(atPath: authURL.path) else {
             throw CodexAuthImportError.authFileMissing(authURL)
@@ -66,7 +82,7 @@ public final class CodexAuthImporter: @unchecked Sendable {
         let slotID = "A"
         let tenantKey = "account:\(accountID ?? "unknown")"
         let accountKey = "tenant:\(tenantKey)|principal:subject:\(subject)"
-        let fingerprint = CredentialFingerprint.make(for: authJSON)
+        let fingerprint = Self.credentialFingerprint(for: tokens, authJSON: authJSON)
 
         let slot = AccountSlot(
             slotID: slotID,
@@ -110,6 +126,23 @@ public final class CodexAuthImporter: @unchecked Sendable {
             refreshToken: tokens.refreshToken,
             idToken: tokens.idToken
         )
+    }
+
+    private static func credentialFingerprint(for tokens: CodexTokens, authJSON: String) -> String {
+        let claims = JWTClaims.decode(from: tokens.idToken) ?? JWTClaims.decode(from: tokens.accessToken)
+        let accountID = tokens.accountID ?? claims?.openAIAuth?["chatgpt_account_id"]?.stringValue
+        let identityParts = [
+            accountID,
+            claims?.subject,
+            claims?.email,
+            claims?.clientID
+        ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if !identityParts.isEmpty {
+            return CredentialFingerprint.make(for: "codex-identity|" + identityParts.joined(separator: "|"))
+        }
+        return CredentialFingerprint.make(for: authJSON)
     }
 }
 

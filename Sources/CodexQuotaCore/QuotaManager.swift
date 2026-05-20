@@ -4,6 +4,7 @@ import Foundation
 public final class QuotaManager: ObservableObject {
     @Published public private(set) var slots: [AccountSlot] = []
     @Published public private(set) var isRefreshing = false
+    @Published public private(set) var refreshingSlotIDs: Set<String> = []
     @Published public private(set) var lastError: String?
 
     public let store: SlotStore
@@ -28,14 +29,28 @@ public final class QuotaManager: ObservableObject {
         slots.compactMap { $0.lastSnapshot?.remaining }.min()
     }
 
-    public var primaryRemaining: Int? {
-        let sessionValues = slots.compactMap { slot -> Int? in
-            guard let snapshot = slot.lastSnapshot, snapshot.fetchHealth != .authError, snapshot.status != .error else {
-                return nil
+    public var sessionRemaining: Int? {
+        validSessionWindows.map(\.remainingPercent).min()
+    }
+
+    public var sessionResetAt: Date? {
+        validSessionWindows.min { lhs, rhs in
+            if lhs.remainingPercent == rhs.remainingPercent {
+                switch (lhs.resetAt, rhs.resetAt) {
+                case (.some(let lhsDate), .some(let rhsDate)):
+                    return lhsDate < rhsDate
+                case (.some, .none):
+                    return true
+                case (.none, .some), (.none, .none):
+                    return false
+                }
             }
-            return snapshot.quotaWindows.first(where: { $0.kind == .session })?.remainingPercent
-        }
-        if let lowestSession = sessionValues.min() {
+            return lhs.remainingPercent < rhs.remainingPercent
+        }?.resetAt
+    }
+
+    public var primaryRemaining: Int? {
+        if let lowestSession = sessionRemaining {
             return lowestSession
         }
 
@@ -76,6 +91,15 @@ public final class QuotaManager: ObservableObject {
         (primaryRemaining ?? 100) < 20 || slots.contains { $0.lastSnapshot?.fetchHealth == .authError }
     }
 
+    private var validSessionWindows: [QuotaWindow] {
+        slots.compactMap { slot -> QuotaWindow? in
+            guard let snapshot = slot.lastSnapshot, snapshot.fetchHealth != .authError, snapshot.status != .error else {
+                return nil
+            }
+            return snapshot.quotaWindows.first(where: { $0.kind == .session })
+        }
+    }
+
     public func load() {
         do {
             let localSlots = try store.load().slots
@@ -97,15 +121,19 @@ public final class QuotaManager: ObservableObject {
         }
     }
 
-    public func refreshAll() async {
+    public func refreshAll(trigger: QuotaRefreshTrigger = .manual) async {
         isRefreshing = true
         defer { isRefreshing = false }
 
         var updated: [AccountSlot] = []
         var surfacedError: String?
         for var slot in slots where slot.isActive {
+            refreshingSlotIDs.insert(slot.slotID)
             do {
-                let snapshot = try await provider.fetchQuota(for: slot)
+                let snapshot = try await provider.fetchQuota(
+                    for: slot,
+                    allowsUserInteraction: shouldAllowSecretInteraction(trigger)
+                )
                 slot.lastSnapshot = snapshot
                 slot.lastSeenAt = Date()
             } catch {
@@ -115,6 +143,7 @@ public final class QuotaManager: ObservableObject {
                     surfacedError = error.localizedDescription
                 }
             }
+            refreshingSlotIDs.remove(slot.slotID)
             updated.append(slot)
         }
 
@@ -124,13 +153,36 @@ public final class QuotaManager: ObservableObject {
         try? persist()
     }
 
+    public func refreshSlot(_ slotID: String, trigger: QuotaRefreshTrigger = .manual) async {
+        guard let index = slots.firstIndex(where: { $0.slotID == slotID && $0.isActive }) else { return }
+        refreshingSlotIDs.insert(slotID)
+        defer { refreshingSlotIDs.remove(slotID) }
+
+        do {
+            let snapshot = try await provider.fetchQuota(
+                for: slots[index],
+                allowsUserInteraction: shouldAllowSecretInteraction(trigger)
+            )
+            slots[index].lastSnapshot = snapshot
+            slots[index].lastSeenAt = Date()
+        } catch {
+            let existing = slots[index].lastSnapshot
+            slots[index].lastSnapshot = staleSnapshot(from: existing, accountLabel: slots[index].displayName, error: error)
+            if shouldSurfaceRefreshError(error, existing: existing) {
+                lastError = error.localizedDescription
+            }
+        }
+        try? persist()
+    }
+
     public func startPolling() {
         guard pollingTask == nil else { return }
         pollingTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                await self.refreshAll()
                 try? await Task.sleep(for: self.pollInterval)
+                if Task.isCancelled { break }
+                await self.refreshAll(trigger: .polling)
             }
         }
     }
@@ -186,6 +238,10 @@ public final class QuotaManager: ObservableObject {
 
     private func shouldSurfaceRefreshError(_ error: Error, existing: QuotaSnapshot?) -> Bool {
         existing == nil || error.isAuthError
+    }
+
+    private func shouldAllowSecretInteraction(_ trigger: QuotaRefreshTrigger) -> Bool {
+        trigger == .manual
     }
 
     private func shouldUseAIPlanMonitorFallback(_ slots: [AccountSlot]) -> Bool {

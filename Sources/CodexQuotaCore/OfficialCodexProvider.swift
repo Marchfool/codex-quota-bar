@@ -2,6 +2,19 @@ import Foundation
 
 public protocol CodexQuotaProvider: Sendable {
     func fetchQuota(for slot: AccountSlot) async throws -> QuotaSnapshot
+    func fetchQuota(for slot: AccountSlot, allowsUserInteraction: Bool) async throws -> QuotaSnapshot
+}
+
+public extension CodexQuotaProvider {
+    func fetchQuota(for slot: AccountSlot, allowsUserInteraction: Bool) async throws -> QuotaSnapshot {
+        try await fetchQuota(for: slot)
+    }
+}
+
+public enum QuotaRefreshTrigger: String, Codable, Sendable {
+    case launch
+    case polling
+    case manual
 }
 
 public enum ProviderError: Error, LocalizedError, Equatable {
@@ -46,10 +59,20 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
     }
 
     public func fetchQuota(for slot: AccountSlot) async throws -> QuotaSnapshot {
+        try await fetchQuota(for: slot, allowsUserInteraction: true)
+    }
+
+    public func fetchQuota(for slot: AccountSlot, allowsUserInteraction: Bool) async throws -> QuotaSnapshot {
         let token: String
-        if let storedToken = try secretStore.get(account: SecretAccount.accessToken(slotID: slot.slotID)) {
+        if let storedToken = try secretStore.get(
+            account: SecretAccount.accessToken(slotID: slot.slotID),
+            allowsUserInteraction: allowsUserInteraction
+        ) {
             token = storedToken
-        } else if let refreshedToken = try await refreshAccessToken(for: slot) {
+        } else if let refreshedToken = try await refreshAccessToken(
+            for: slot,
+            allowsUserInteraction: allowsUserInteraction
+        ) {
             token = refreshedToken
         } else {
             throw ProviderError.missingCredential
@@ -64,7 +87,10 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         case 200:
             return try decodeSnapshot(data: data, slot: slot)
         case 401, 403:
-            guard let refreshedToken = try await refreshAccessToken(for: slot) else {
+            guard let refreshedToken = try await refreshAccessToken(
+                for: slot,
+                allowsUserInteraction: allowsUserInteraction
+            ) else {
                 throw ProviderError.unauthorized
             }
             let (retryData, retryResponse) = try await session.data(for: quotaRequest(token: refreshedToken))
@@ -92,9 +118,15 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         return request
     }
 
-    private func refreshAccessToken(for slot: AccountSlot) async throws -> String? {
-        guard let refreshToken = try secretStore.get(account: SecretAccount.refreshToken(slotID: slot.slotID)),
-              let clientID = try secretStore.get(account: SecretAccount.clientID(slotID: slot.slotID))
+    private func refreshAccessToken(for slot: AccountSlot, allowsUserInteraction: Bool) async throws -> String? {
+        guard let refreshToken = try secretStore.get(
+            account: SecretAccount.refreshToken(slotID: slot.slotID),
+            allowsUserInteraction: allowsUserInteraction
+        ),
+              let clientID = try secretStore.get(
+                account: SecretAccount.clientID(slotID: slot.slotID),
+                allowsUserInteraction: allowsUserInteraction
+              )
         else {
             return nil
         }

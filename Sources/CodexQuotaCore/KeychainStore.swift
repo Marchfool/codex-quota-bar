@@ -1,20 +1,31 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 public protocol SecretStore: Sendable {
     func set(_ value: String, account: String) throws
     func get(account: String) throws -> String?
+    func get(account: String, allowsUserInteraction: Bool) throws -> String?
     func delete(account: String) throws
 }
 
 public enum KeychainError: Error, LocalizedError {
     case unexpectedStatus(OSStatus)
+    case userInteractionRequired
 
     public var errorDescription: String? {
         switch self {
         case .unexpectedStatus(let status):
             return "Keychain returned status \(status)."
+        case .userInteractionRequired:
+            return "Keychain requires user approval."
         }
+    }
+}
+
+public extension SecretStore {
+    func get(account: String, allowsUserInteraction: Bool) throws -> String? {
+        try get(account: account)
     }
 }
 
@@ -42,12 +53,24 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     }
 
     public func get(account: String) throws -> String? {
+        try get(account: account, allowsUserInteraction: true)
+    }
+
+    public func get(account: String, allowsUserInteraction: Bool) throws -> String? {
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        if !allowsUserInteraction {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext as String] = context
+        }
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
+        if !allowsUserInteraction && (status == errSecInteractionNotAllowed || status == errSecAuthFailed) {
+            throw KeychainError.userInteractionRequired
+        }
         guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
         guard let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
