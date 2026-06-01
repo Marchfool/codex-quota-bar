@@ -486,12 +486,32 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         process.standardError = Pipe()
 
         let semaphore = DispatchSemaphore(value: 0)
-        let output = LockedBox<Data?>(nil)
+        let output = SupplementalCommandOutput()
+
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                if output.finish() {
+                    semaphore.signal()
+                }
+                return
+            }
+
+            if output.append(data, responseExtractor: accountRateLimitsResponseData(from:)) {
+                handle.readabilityHandler = nil
+                try? inputPipe.fileHandleForWriting.close()
+                if process.isRunning {
+                    process.terminate()
+                }
+                semaphore.signal()
+            }
+        }
 
         process.terminationHandler = { _ in
-            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            output.set(data)
-            semaphore.signal()
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            if output.finish() {
+                semaphore.signal()
+            }
         }
 
         do {
@@ -500,23 +520,21 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
             if let inputData = input.data(using: .utf8) {
                 inputPipe.fileHandleForWriting.write(inputData)
             }
-            try? inputPipe.fileHandleForWriting.close()
         } catch {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
             return nil
         }
 
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
-            if process.isRunning {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            if output.finish(), process.isRunning {
+                try? inputPipe.fileHandleForWriting.close()
                 process.terminate()
             }
             return nil
         }
 
-        let completedOutput = output.get()
-        guard let completedOutput else {
-            return nil
-        }
-        return accountRateLimitsResponseData(from: completedOutput)
+        return output.response()
     }
 
     private func decodeRateWindow(
@@ -598,5 +616,41 @@ private actor SupplementalRateLimitsCache {
     func store(_ data: Data) {
         cachedData = data
         cachedAt = Date()
+    }
+}
+
+private final class SupplementalCommandOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var responseData: Data?
+    private var isFinished = false
+
+    func append(_ data: Data, responseExtractor: (Data) -> Data?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isFinished else { return false }
+
+        buffer.append(data)
+        guard let response = responseExtractor(buffer) else {
+            return false
+        }
+
+        responseData = response
+        isFinished = true
+        return true
+    }
+
+    func finish() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isFinished else { return false }
+        isFinished = true
+        return true
+    }
+
+    func response() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return responseData
     }
 }

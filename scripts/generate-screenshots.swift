@@ -176,13 +176,16 @@ func drawPanelScreenshot() -> NSImage {
         text(label, rect: NSRect(x: x, y: panel.minY + 27, width: 56, height: 12), size: 10.5, weight: .medium, color: NSColor.white.withAlphaComponent(0.62), align: .center)
     }
 
-    let menu = NSRect(x: 98, y: 410, width: 490, height: 42)
-    rounded(menu, radius: 21, fill: NSColor.white.withAlphaComponent(0.11), stroke: NSColor.white.withAlphaComponent(0.14), lineWidth: 1)
-    circle(NSPoint(x: menu.minX + 24, y: menu.midY), radius: 4, color: cyan)
-    text("Codex 83% 1h42m", rect: NSRect(x: menu.minX + 36, y: menu.minY + 12, width: 150, height: 18), size: 14, weight: .semibold)
-    circle(NSPoint(x: menu.minX + 212, y: menu.midY), radius: 4, color: orange)
-    text("Claude 71% 2h05m", rect: NSRect(x: menu.minX + 224, y: menu.minY + 12, width: 165, height: 18), size: 14, weight: .semibold)
-    text("18.6G", rect: NSRect(x: menu.maxX - 78, y: menu.minY + 12, width: 55, height: 18), size: 14, weight: .bold, color: green, align: .right)
+    let menu = NSRect(x: 98, y: 410, width: 590, height: 42)
+    rounded(menu, radius: 21, fill: NSColor.black.withAlphaComponent(0.24), stroke: NSColor.white.withAlphaComponent(0.12), lineWidth: 1)
+    circle(NSPoint(x: menu.minX + 24, y: menu.midY), radius: 5, color: yellow)
+    rounded(NSRect(x: menu.minX + 44, y: menu.minY + 7, width: 76, height: 28), radius: 14, fill: NSColor.white.withAlphaComponent(0.10))
+    text("18.6G", rect: NSRect(x: menu.minX + 56, y: menu.minY + 14, width: 52, height: 16), size: 12.5, weight: .bold, color: green, align: .center)
+    circle(NSPoint(x: menu.minX + 150, y: menu.midY), radius: 4, color: cyan)
+    text("Codex 83% 1h42m", rect: NSRect(x: menu.minX + 164, y: menu.minY + 12, width: 150, height: 18), size: 14, weight: .semibold)
+    text("|", rect: NSRect(x: menu.minX + 316, y: menu.minY + 12, width: 14, height: 18), size: 14, weight: .semibold, color: NSColor.white.withAlphaComponent(0.36), align: .center)
+    circle(NSPoint(x: menu.minX + 342, y: menu.midY), radius: 4, color: orange)
+    text("Claude 71% 2h05m", rect: NSRect(x: menu.minX + 356, y: menu.minY + 12, width: 165, height: 18), size: 14, weight: .semibold)
 
     text("Dashboard + floating widget share the same card stack.",
          rect: NSRect(x: 100, y: 358, width: 520, height: 22), size: 16, color: NSColor.white.withAlphaComponent(0.58))
@@ -205,15 +208,15 @@ func drawMenuBarScreenshot() -> NSImage {
     text("Finder", rect: NSRect(x: bar.minX + 22, y: bar.minY + 16, width: 80, height: 18), size: 14, weight: .medium, color: NSColor.white.withAlphaComponent(0.78))
     text("File   Edit   View   Window   Help", rect: NSRect(x: bar.minX + 102, y: bar.minY + 16, width: 280, height: 18), size: 14, color: NSColor.white.withAlphaComponent(0.55))
 
-    let right = bar.maxX - 470
-    circle(NSPoint(x: right + 14, y: bar.midY), radius: 5, color: yellow)
+    let right = bar.maxX - 510
+    circle(NSPoint(x: right + 12, y: bar.midY), radius: 5, color: yellow)
     rounded(NSRect(x: right + 32, y: bar.minY + 10, width: 74, height: 30), radius: 15, fill: NSColor.white.withAlphaComponent(0.10))
     text("18.6G", rect: NSRect(x: right + 42, y: bar.minY + 17, width: 52, height: 16), size: 12.5, weight: .bold, color: green, align: .center)
-    rounded(NSRect(x: right + 116, y: bar.minY + 10, width: 308, height: 30), radius: 15, fill: NSColor.white.withAlphaComponent(0.11), stroke: NSColor.white.withAlphaComponent(0.14), lineWidth: 0.8)
     circle(NSPoint(x: right + 136, y: bar.midY), radius: 4, color: cyan)
     text("Codex 83% 1h42m", rect: NSRect(x: right + 148, y: bar.minY + 17, width: 128, height: 16), size: 12.5, weight: .semibold)
-    circle(NSPoint(x: right + 292, y: bar.midY), radius: 4, color: orange)
-    text("Claude 71%", rect: NSRect(x: right + 304, y: bar.minY + 17, width: 82, height: 16), size: 12.5, weight: .semibold)
+    text("|", rect: NSRect(x: right + 282, y: bar.minY + 17, width: 12, height: 16), size: 12.5, weight: .semibold, color: NSColor.white.withAlphaComponent(0.38), align: .center)
+    circle(NSPoint(x: right + 310, y: bar.midY), radius: 4, color: orange)
+    text("Claude 71% 2h05m", rect: NSRect(x: right + 322, y: bar.minY + 17, width: 136, height: 16), size: 12.5, weight: .semibold)
 
     text("CodexQuotaBar", rect: NSRect(x: 88, y: 104, width: 260, height: 34), size: 30, weight: .bold)
     text("Menu bar quota, Codex task light, and memory pressure indicator at a glance.",
