@@ -236,12 +236,14 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         let usageObj: [String: Any]?
         let limitsObj: [String: Any]?
         let designUsageObj: [String: Any]?
+        let routineUsageObj: [String: Any]?
 
         if let root {
             orgsArray = root["organizations"] as? [[String: Any]]
             usageObj = root["usage"] as? [String: Any]
             limitsObj = root["limits"] as? [String: Any]
             designUsageObj = root["designUsage"] as? [String: Any]
+            routineUsageObj = root["routineUsage"] as? [String: Any]
             // Log raw keys for debugging
             NSLog("[Claude] usage keys: %@", (usageObj?.keys.map { $0 } ?? []).joined(separator: ","))
             NSLog("[Claude] limits keys: %@", (limitsObj?.keys.map { $0 } ?? []).joined(separator: ","))
@@ -256,6 +258,7 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
             usageObj = nil
             limitsObj = nil
             designUsageObj = nil
+            routineUsageObj = nil
         }
 
         guard let org = orgsArray?.first else {
@@ -358,6 +361,17 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
             }
             if let subtitle = stringValue(design["description"] ?? design["note"]) {
                 extras["designNote"] = subtitle
+            }
+        }
+
+        // Daily routine runs (replaced "Claude Design" on the usage page). Parsed from the DOM
+        // as "X / Y"; the usage API does not expose it.
+        if let routine = routineUsageObj {
+            let used = intValue(routine["used"]) ?? 0
+            let total = intValue(routine["total"]) ?? 0
+            if total > 0 {
+                extras["routineUsed"] = "\(used)"
+                extras["routineTotal"] = "\(total)"
             }
         }
 

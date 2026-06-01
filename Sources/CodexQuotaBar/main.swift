@@ -1,6 +1,11 @@
 import AppKit
+import CodexQuotaBarSupport
 import CodexQuotaCore
+import CommonCrypto
 import Foundation
+import LocalAuthentication
+import Security
+import SQLite3
 import SwiftUI
 import WebKit
 import WidgetKit
@@ -25,6 +30,30 @@ private enum RuntimeDiagnostics {
 
 private enum StartupRefreshPolicy {
     static let initialRefreshDelay: Duration = .seconds(2)
+    static let initialRefreshDelaySeconds: TimeInterval = 2
+    static let unifiedRefreshIntervalSeconds: TimeInterval = 120
+}
+
+@MainActor
+private final class RefreshCadence: ObservableObject {
+    let intervalSeconds: TimeInterval
+    @Published private(set) var nextRefreshAt: Date
+    @Published private(set) var isRefreshing = false
+
+    init(intervalSeconds: TimeInterval, initialDelaySeconds: TimeInterval) {
+        self.intervalSeconds = intervalSeconds
+        self.nextRefreshAt = Date().addingTimeInterval(initialDelaySeconds)
+    }
+
+    func markStarted(now: Date = Date()) {
+        isRefreshing = true
+        nextRefreshAt = now.addingTimeInterval(intervalSeconds)
+    }
+
+    func markFinished(now: Date = Date()) {
+        isRefreshing = false
+        nextRefreshAt = now.addingTimeInterval(intervalSeconds)
+    }
 }
 
 private struct AppLaunchDiagnostics {
@@ -85,8 +114,14 @@ private struct StartupImportDecision {
     let reason: String
 }
 
+private final class FullBleedHostingView<Content: View>: NSHostingView<Content> {
+    override var safeAreaInsets: NSEdgeInsets {
+        NSEdgeInsets()
+    }
+}
+
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var manager: QuotaManager!
     private var apiKeyManager: APIKeyManager!
@@ -97,10 +132,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var desktopWidgetWindow: NSPanel?
     private let popover = NSPopover()
     private let claudeWebFetcher = ClaudeWebFetcher()
+    private let memoryMonitor = MemoryMonitorController()
+    private let trafficLight = CodexTrafficLightController()
+    private let claudeActivity = ClaudeActivityController()
     private var didPerformStartupImport = false
     private var startupImportReason = "not_evaluated"
     private var didAccessClaudeSafeStorageDuringLaunch = false
     private var isPerformingInitialLaunchRefresh = false
+    private var unifiedPollingTask: Task<Void, Never>?
+    private var isRunningUnifiedRefresh = false
+    private let refreshCadence = RefreshCadence(
+        intervalSeconds: StartupRefreshPolicy.unifiedRefreshIntervalSeconds,
+        initialDelaySeconds: StartupRefreshPolicy.initialRefreshDelaySeconds
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -127,8 +171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleClaudeSafeStorageAccessAttempt()
             }
         }
-        apiKeyManager.claudeFetcher = { [claudeWebFetcher] in
-            try await claudeWebFetcher.fetchOrganizations()
+        apiKeyManager.claudeFetcher = { [claudeWebFetcher] allowsUserInteraction in
+            try await claudeWebFetcher.fetchOrganizations(allowsUserInteraction: allowsUserInteraction)
         }
         manager.load()
         apiKeyManager.load()
@@ -150,6 +194,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.action = #selector(togglePopover)
         configureStatusButton()
 
+        // Always start data collection (the dropdown/widget cards need it even when the
+        // menu-bar items are hidden); the toggles only control status-item visibility.
+        memoryMonitor.start()
+        trafficLight.start()
+        // Claude has no reliable "generating" signal (Electron + opaque IndexedDB), so its
+        // activity watcher is left inert — the Claude card stays static. Only Codex has a work light.
+        applyStatusBarVisibility()
+
         popover.behavior = .transient
         popover.animates = true
         updatePopoverSize()
@@ -157,6 +209,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: MonitorPanelView(
                 manager: manager,
                 apiKeyManager: apiKeyManager,
+                refreshCadence: refreshCadence,
+                memoryMonitor: memoryMonitor,
+                trafficLight: trafficLight,
+                claudeActivity: claudeActivity,
                 refresh: { [weak self] in self?.refreshNow() },
                 importAccount: { [weak self] in self?.importAccount() },
                 showAccounts: { [weak self] in self?.showAccounts() },
@@ -174,8 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             isPerformingInitialLaunchRefresh = true
             try? await Task.sleep(for: StartupRefreshPolicy.initialRefreshDelay)
-            await manager.refreshAll(trigger: .launch)
-            await apiKeyManager.refreshAll(trigger: .launch)
+            await refreshEverything(quotaTrigger: .launch, apiTrigger: .launch)
             isPerformingInitialLaunchRefresh = false
             NSLog(
                 "CodexQuotaBar startup refresh completed claudeSafeStorageAccessed=%@",
@@ -184,10 +239,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             WidgetCenter.shared.reloadAllTimelines()
             updatePopoverSize()
             configureStatusButton()
+            startUnifiedPolling()
         }
         showDesktopWidget()
-        manager.startPolling()
-        apiKeyManager.startPolling()
 
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -309,8 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshNow() {
         Task {
-            await manager.refreshAll()
-            await apiKeyManager.refreshAll()
+            await refreshEverything(quotaTrigger: .manual, apiTrigger: .manual)
             WidgetCenter.shared.reloadAllTimelines()
             updatePopoverSize()
             configureStatusButton()
@@ -350,17 +403,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private func applyStatusBarVisibility() {
+        memoryMonitor.setVisible(UserDefaults.standard.object(forKey: "showMemoryIndicator") as? Bool ?? true)
+        trafficLight.setVisible(UserDefaults.standard.object(forKey: "showCodexTrafficLight") as? Bool ?? true)
+    }
+
     @objc private func showAPIKeys() {
         popover.performClose(nil)
         if apiKeysWindow == nil {
-            let view = APIKeySettingsView(manager: apiKeyManager)
+            let view = APIKeySettingsView(
+                manager: apiKeyManager,
+                quotaManager: manager,
+                openDataFolder: { [weak self] in self?.openLogs() },
+                applyStatusBarVisibility: { [weak self] in self?.applyStatusBarVisibility() }
+            )
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "API Key 与余额"
+            window.title = "设置"
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: view)
             window.center()
@@ -372,6 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleDesktopWidget() {
         if let window = desktopWidgetWindow, window.isVisible {
+            saveDesktopWidgetFrame(window)
             window.orderOut(nil)
             UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
             return
@@ -380,36 +444,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showDesktopWidget()
     }
 
+    private func applyDesktopWidgetPinLevel() {
+        let pinned = UserDefaults.standard.bool(forKey: "desktopWidgetPinned")
+        desktopWidgetWindow?.level = pinned ? .floating : .normal
+        if pinned {
+            desktopWidgetWindow?.orderFrontRegardless()
+        }
+    }
+
     private func showDesktopWidget() {
         if desktopWidgetWindow == nil {
             let cornerRadius: CGFloat = 28
+            let initialFrame = DesktopWidgetFrameStore.initialFrame(visibleFrame: desktopWidgetVisibleFrame())
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 396, height: 596),
-                styleMask: [.borderless, .nonactivatingPanel],
+                contentRect: initialFrame,
+                styleMask: [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
             )
+            panel.minSize = DesktopWidgetFrameStore.minimumSize
+            panel.delegate = self
+            panel.title = ""
+            panel.titleVisibility = .hidden
+            panel.titlebarAppearsTransparent = true
+            panel.styleMask.insert(.fullSizeContentView)
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.hasShadow = true
-            panel.level = .floating
+            panel.level = UserDefaults.standard.bool(forKey: "desktopWidgetPinned") ? .floating : .normal
             panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
             panel.isMovableByWindowBackground = true
-            let hostingView = NSHostingView(rootView: FloatingDesktopWidgetView(manager: manager, apiKeyManager: apiKeyManager))
+            let hostingView = FullBleedHostingView(rootView: FloatingDesktopWidgetView(
+                manager: manager,
+                apiKeyManager: apiKeyManager,
+                refreshCadence: refreshCadence,
+                memoryMonitor: memoryMonitor,
+                trafficLight: trafficLight,
+                claudeActivity: claudeActivity,
+                onPinChanged: { [weak self] in self?.applyDesktopWidgetPinLevel() }
+            ))
             hostingView.wantsLayer = true
             hostingView.layer?.cornerRadius = cornerRadius
             hostingView.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
             hostingView.layer?.masksToBounds = true
             hostingView.layer?.backgroundColor = NSColor.clear.cgColor
             panel.contentView = hostingView
+            hideDesktopWidgetWindowChrome(panel)
             desktopWidgetWindow = panel
         }
 
-        if let screenFrame = NSScreen.main?.visibleFrame {
-            desktopWidgetWindow?.setFrameOrigin(NSPoint(x: screenFrame.maxX - 412, y: screenFrame.maxY - 626))
+        if let window = desktopWidgetWindow {
+            let frame = DesktopWidgetFrameStore.clampedFrame(window.frame, visibleFrame: desktopWidgetVisibleFrame())
+            window.setFrame(frame, display: false)
+            saveDesktopWidgetFrame(window)
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        saveDesktopWidgetFrame(from: notification)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === desktopWidgetWindow else { return }
+        guard !window.inLiveResize else { return }
+
+        saveDesktopWidgetFrame(window)
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        saveDesktopWidgetFrame(from: notification)
+    }
+
+    private func hideDesktopWidgetWindowChrome(_ window: NSWindow) {
+        [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton,
+            .toolbarButton,
+            .documentIconButton
+        ].forEach { buttonType in
+            window.standardWindowButton(buttonType)?.isHidden = true
+        }
+
+        guard let titlebarView = window.standardWindowButton(.closeButton)?.superview else { return }
+        titlebarView.isHidden = true
+        if let titlebarContainer = titlebarView.superview,
+           String(describing: type(of: titlebarContainer)).localizedCaseInsensitiveContains("titlebar") {
+            titlebarContainer.isHidden = true
+        }
+    }
+
+    private func saveDesktopWidgetFrame(from notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === desktopWidgetWindow else { return }
+        saveDesktopWidgetFrame(window)
+    }
+
+    private func saveDesktopWidgetFrame(_ window: NSWindow) {
+        DesktopWidgetFrameStore.save(window.frame)
+    }
+
+    private func desktopWidgetVisibleFrame() -> CGRect {
+        if let window = desktopWidgetWindow,
+           let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(window.frame) }) {
+            return screen.visibleFrame
+        }
+
+        return NSScreen.main?.visibleFrame
+            ?? NSScreen.screens.first?.visibleFrame
+            ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
     }
 
     @objc private func openLogs() {
@@ -473,6 +617,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func startUnifiedPolling() {
+        guard unifiedPollingTask == nil else { return }
+        unifiedPollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let secondsUntilRefresh = max(0, self?.refreshCadence.nextRefreshAt.timeIntervalSinceNow ?? 0)
+                if secondsUntilRefresh > 0 {
+                    let sleepSeconds = min(secondsUntilRefresh, 1)
+                    try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
+                    continue
+                }
+                if Task.isCancelled { break }
+                await self?.refreshEverything(quotaTrigger: .polling, apiTrigger: .polling)
+            }
+        }
+    }
+
+    private func refreshEverything(quotaTrigger: QuotaRefreshTrigger, apiTrigger: APIRefreshTrigger) async {
+        guard !isRunningUnifiedRefresh else { return }
+        isRunningUnifiedRefresh = true
+        refreshCadence.markStarted()
+        defer {
+            isRunningUnifiedRefresh = false
+            refreshCadence.markFinished()
+        }
+        async let quotaRefresh: Void = manager.refreshAll(trigger: quotaTrigger)
+        async let apiRefresh: Void = apiKeyManager.refreshAll(trigger: apiTrigger)
+        _ = await (quotaRefresh, apiRefresh)
+    }
+
     private func migrateStoredProfiles() {
         do {
             _ = try profileStore.load()
@@ -498,6 +671,10 @@ private struct MonitorHeaderIcon: View {
 private struct MonitorPanelView: View {
     @ObservedObject var manager: QuotaManager
     @ObservedObject var apiKeyManager: APIKeyManager
+    @ObservedObject var refreshCadence: RefreshCadence
+    @ObservedObject var memoryMonitor: MemoryMonitorController
+    @ObservedObject var trafficLight: CodexTrafficLightController
+    @ObservedObject var claudeActivity: ClaudeActivityController
     let refresh: () -> Void
     let importAccount: () -> Void
     let showAccounts: () -> Void
@@ -506,6 +683,7 @@ private struct MonitorPanelView: View {
     let toggleDesktopWidget: () -> Void
     let openDataFolder: () -> Void
     let quit: () -> Void
+    @State private var copiedProviderID: APIKeyProviderID?
 
     private var panelHeight: CGFloat {
         PanelMetrics.height(
@@ -552,27 +730,28 @@ private struct MonitorPanelView: View {
                     header
 
                     ScrollView(.vertical, showsIndicators: false) {
-                        VStack(spacing: 10) {
+                        VStack(spacing: 8) {
                             if let lastError = manager.lastError {
                                 MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
                             }
 
-                            APIBalanceSection(
-                                codexManager: manager,
-                                manager: apiKeyManager,
-                                slots: manager.slots,
-                                openSettings: showAPIKeys,
-                                refresh: refreshAPIKeys,
-                                importAccount: importAccount,
-                                showAccounts: showAccounts
+                            SubscriptionCardStack(
+                                manager: manager,
+                                apiKeyManager: apiKeyManager,
+                                refreshCadence: refreshCadence,
+                                memoryMonitor: memoryMonitor,
+                                trafficLight: trafficLight,
+                                claudeActivity: claudeActivity,
+                                importAccount: importAccount
                             )
                         }
                         .padding(.horizontal, 12)
                         .padding(.top, 12)
-                        .padding(.bottom, 10)
+                        .padding(.bottom, 8)
                     }
                     .frame(maxHeight: PanelMetrics.scrollHeight(for: panelHeight))
 
+                    copyRow
                     actionBar
                 }
             }
@@ -616,16 +795,49 @@ private struct MonitorPanelView: View {
         return "5小时与周额度实时监控"
     }
 
+    private var copyRow: some View {
+        HStack(spacing: 8) {
+            ForEach(apiKeyManager.providers) { provider in
+                FloatingCopyButton(
+                    title: provider.displayName,
+                    color: Color(hex: provider.colorHex) ?? .white.opacity(0.6),
+                    isCopied: copiedProviderID == provider.id,
+                    isEnabled: apiKeyManager.canCopyPrimaryValue(providerID: provider.id),
+                    action: { copyKey(provider.id) }
+                )
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+
+    private func copyKey(_ providerID: APIKeyProviderID) {
+        let value = apiKeyManager.primaryCopyValue(providerID: providerID)
+        guard !value.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        copiedProviderID = providerID
+    }
+
+    private var actionBarDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.12))
+            .frame(width: 1, height: 22)
+            .padding(.horizontal, 3)
+    }
+
     private var actionBar: some View {
         HStack(spacing: 6) {
             IconButton(title: "刷新", systemImage: "arrow.clockwise", action: refresh)
                 .disabled(manager.isRefreshing)
-            IconButton(title: "导入", systemImage: "person.crop.circle.badge.plus", action: importAccount)
-            IconButton(title: "账号", systemImage: "person.2", action: showAccounts)
-            IconButton(title: "密钥", systemImage: "key", action: showAPIKeys)
             IconButton(title: "桌面", systemImage: "rectangle.on.rectangle", action: toggleDesktopWidget)
-            IconButton(title: "数据", systemImage: "folder", action: openDataFolder)
-            Spacer()
+
+            actionBarDivider
+
+            IconButton(title: "设置", systemImage: "gearshape", action: showAPIKeys)
+
+            Spacer(minLength: 0)
+
             Button(action: quit) {
                 Image(systemName: "power")
                     .font(.system(size: 15, weight: .medium))
@@ -650,18 +862,21 @@ private struct MonitorPanelView: View {
 }
 
 private enum PanelMetrics {
-    static let width: CGFloat = 392
+    static let width: CGFloat = 344
     static let heightScale: CGFloat = 1.0
-    static let minHeight: CGFloat = 300
-    static let maxHeight: CGFloat = 620
-    private static let chromeHeight: CGFloat = 104
+    static let minHeight: CGFloat = 320
+    static let maxHeight: CGFloat = 760
+    // header + copy row + action bar
+    private static let chromeHeight: CGFloat = 140
+    // Codex traffic-light strip (~34) + memory card (~120)
+    private static let extrasHeight: CGFloat = 158
 
     static func rawHeight(codexSlotCount: Int, apiProviderCount: Int, hasError: Bool) -> CGFloat {
         let visibleCardCount = max(1, codexSlotCount) + apiProviderCount
         let cardsHeight = CGFloat(visibleCardCount) * 76
         let cardGaps = CGFloat(max(0, visibleCardCount - 1)) * 6
         let errorHeight: CGFloat = hasError ? 42 : 0
-        let contentHeight = cardsHeight + cardGaps + errorHeight + 22
+        let contentHeight = cardsHeight + cardGaps + errorHeight + extrasHeight + 22
         return chromeHeight + contentHeight
     }
 
@@ -780,8 +995,8 @@ private struct SlotCard: View {
             } else if let snapshot = slot.lastSnapshot, !snapshot.quotaWindows.isEmpty {
                 ForEach(snapshot.quotaWindows) { window in
                     metricLine(
-                        title: window.kind == .session ? "5小时" : "每周",
-                        value: QuotaFormatters.absoluteResetText(window.resetAt),
+                        title: codexWindowMetricTitle(window),
+                        value: codexWindowMetricValue(window),
                         meterLabel: QuotaFormatters.compactRemainingDurationText(window.resetAt),
                         percent: window.remainingPercent
                     )
@@ -1283,12 +1498,13 @@ private struct APIBalanceCard: View {
         if provider.id == .claude, provider.lastSnapshot?.setupState == .ready {
             metricLine(title: "5小时", value: claudeResetDisplay(provider.lastSnapshot?.extras["fiveHourResetsAt"]), meterLabel: claudeRemainingLabel(provider.lastSnapshot?.extras["fiveHourResetsAt"]), percent: claudeFiveHourRemaining)
             metricLine(title: "每周", value: claudeResetDisplay(provider.lastSnapshot?.extras["sevenDayResetsAt"]), meterLabel: claudeRemainingLabel(provider.lastSnapshot?.extras["sevenDayResetsAt"]), percent: claudeSevenDayRemaining)
-            if provider.lastSnapshot?.extras["designUsed"] != nil {
+            if let total = provider.lastSnapshot?.extras["routineTotal"], let totalNum = Int(total), totalNum > 0 {
+                let used = Int(provider.lastSnapshot?.extras["routineUsed"] ?? "0") ?? 0
                 metricLine(
-                    title: "Design",
-                    value: claudeResetDisplay(provider.lastSnapshot?.extras["designResetsAt"], fallback: provider.lastSnapshot?.extras["designResetLabel"]),
-                    meterLabel: claudeRemainingLabel(provider.lastSnapshot?.extras["designResetsAt"], fallback: provider.lastSnapshot?.extras["designResetLabel"]),
-                    percent: claudeDesignRemaining
+                    title: "Routine",
+                    value: "今日 \(used)/\(totalNum) 次",
+                    meterLabel: "剩 \(max(0, totalNum - used))",
+                    percent: claudeRoutineRemaining
                 )
             }
         } else if provider.id == .minimax, provider.lastSnapshot != nil {
@@ -1406,8 +1622,9 @@ private struct APIBalanceCard: View {
             return snapshot.extras["displayFullBalance"].map { "满格参考 \($0)" } ?? (snapshot.extras["balanceYuan"].map { "约 \($0)" } ?? "未配置")
         case .claude:
             if let fh = snapshot.extras["fiveHourUsed"], let sd = snapshot.extras["sevenDayUsed"] {
-                if let design = snapshot.extras["designUsed"] {
-                    return "5h已用 \(fh)% · 每周已用 \(sd)% · Design已用 \(design)%"
+                if let total = snapshot.extras["routineTotal"] {
+                    let used = snapshot.extras["routineUsed"] ?? "0"
+                    return "5h已用 \(fh)% · 每周已用 \(sd)% · Routine \(used)/\(total)"
                 }
                 return "5h已用 \(fh)% · 每周已用 \(sd)%"
             }
@@ -1445,6 +1662,13 @@ private struct APIBalanceCard: View {
     private var claudeDesignRemaining: Int {
         guard let snapshot = provider.lastSnapshot, let val = snapshot.extras["designUsed"], let u = Int(val) else { return 100 }
         return max(0, 100 - u)
+    }
+
+    private var claudeRoutineRemaining: Int {
+        guard let snapshot = provider.lastSnapshot,
+              let total = Int(snapshot.extras["routineTotal"] ?? ""), total > 0 else { return 100 }
+        let used = Int(snapshot.extras["routineUsed"] ?? "0") ?? 0
+        return max(0, min(100, Int((Double(total - used) / Double(total) * 100).rounded())))
     }
 
     private func claudeResetDisplay(_ iso: String?, fallback: String? = nil) -> String {
@@ -1560,13 +1784,399 @@ private struct PercentPill: View {
     }
 }
 
+// Shared card stack used by BOTH the desktop floating widget and the menu-bar popover,
+// so the two surfaces render visually identical cards.
+// Thin Codex task-status strip (the menu-bar traffic light, surfaced inside the panel/widget).
+private struct CodexTrafficLightStrip: View {
+    @ObservedObject var trafficLight: CodexTrafficLightController
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(Color(nsColor: trafficLight.mode.color))
+                .frame(width: 8, height: 8)
+                .shadow(color: Color(nsColor: trafficLight.mode.color).opacity(0.6), radius: 3)
+            Text("Codex 任务")
+                .font(.custom("Avenir Next Demi Bold", size: 10.5))
+                .foregroundStyle(.white.opacity(0.78))
+            Text(trafficLight.mode.label)
+                .font(.custom("Avenir Next Medium", size: 10))
+                .foregroundStyle(.white.opacity(0.52))
+            Spacer(minLength: 0)
+            Text(trafficLight.detail)
+                .font(.custom("Avenir Next Medium", size: 9))
+                .foregroundStyle(.white.opacity(0.36))
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.06), lineWidth: 0.8))
+    }
+}
+
+// Memory card: sparkline of pressure history + used GB + breakdown, matching the dark card style.
+private struct MemoryCardView: View {
+    @ObservedObject var monitor: MemoryMonitorController
+
+    private var levelColor: Color {
+        guard let level = monitor.current?.pressureLevel else { return Color(red: 0.27, green: 0.78, blue: 0.34) }
+        if level >= 4 { return Color(red: 0.93, green: 0.32, blue: 0.27) }
+        if level >= 2 { return Color(red: 0.95, green: 0.78, blue: 0.22) }
+        return Color(red: 0.27, green: 0.78, blue: 0.34)
+    }
+
+    var body: some View {
+        let s = monitor.current
+        let g: (Double) -> String = { String(format: "%.2f GB", $0 / 1_073_741_824) }
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Circle().fill(levelColor).frame(width: 7, height: 7)
+                Text("内存")
+                    .font(.custom("Avenir Next Demi Bold", size: 14))
+                    .foregroundStyle(.white.opacity(0.94))
+                Spacer(minLength: 0)
+                Text(s.map { String(format: "%.1f / %.0f GB", $0.usedBytes / 1_073_741_824, $0.physicalBytes / 1_073_741_824) } ?? "--")
+                    .font(.custom("Avenir Next Demi Bold", size: 13))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .monospacedDigit()
+            }
+
+            MemorySparkline(points: monitor.historySamples)
+                .frame(height: 40)
+
+            if let s {
+                HStack(alignment: .top, spacing: 14) {
+                    memColumn([("已用", g(s.usedBytes)), ("App", g(s.appBytes)), ("联动", g(s.wiredBytes))])
+                    memColumn([("已缓存", g(s.cachedBytes)), ("已压缩", g(s.compressedBytes)), ("Swap", g(s.swapUsedBytes))])
+                }
+            }
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(
+            LinearGradient(colors: [Color(red: 0.05, green: 0.18, blue: 0.20), Color(red: 0.03, green: 0.11, blue: 0.13)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(levelColor.opacity(0.24), lineWidth: 0.9))
+    }
+
+    private func memColumn(_ rows: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(rows, id: \.0) { row in
+                HStack(spacing: 6) {
+                    Text(row.0)
+                        .font(.custom("Avenir Next Medium", size: 9.5))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(width: 38, alignment: .leading)
+                    Text(row.1)
+                        .font(.custom("Avenir Next Medium", size: 10))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .monospacedDigit()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MemorySparkline: View {
+    let points: [MemoryPoint]
+    private let windowSeconds: TimeInterval = 60
+    private let frameInterval: TimeInterval = 0.25
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: frameInterval)) { timeline in
+            GeometryReader { proxy in
+                let w = proxy.size.width
+                let h = proxy.size.height
+                let renderPoints = renderedPoints(now: timeline.date)
+                let windowStart = timeline.date.addingTimeInterval(-windowSeconds)
+                let maxV = max(renderPoints.map(\.ratio).max() ?? 0.05, 0.05)
+                let pts = renderPoints.map { point -> CGPoint in
+                    let progress = min(1, max(0, point.capturedAt.timeIntervalSince(windowStart) / windowSeconds))
+                    return CGPoint(
+                        x: w * CGFloat(progress),
+                        y: h - h * CGFloat(min(1, point.ratio / maxV)) * 0.9 - 2
+                    )
+                }
+                ZStack {
+                    if pts.count > 1 {
+                        // Group consecutive same-level points into runs, each keeping its
+                        // historical color while the time window glides between samples.
+                        ForEach(Array(colorRuns(for: renderPoints).enumerated()), id: \.offset) { _, run in
+                            let c = Color(nsColor: memoryPressureColor(run.level))
+                            if run.end > run.start {
+                                Path { p in
+                                    p.move(to: CGPoint(x: pts[run.start].x, y: h))
+                                    for i in run.start...run.end { p.addLine(to: pts[i]) }
+                                    p.addLine(to: CGPoint(x: pts[run.end].x, y: h))
+                                    p.closeSubpath()
+                                }
+                                .fill(c.opacity(0.26))
+                                Path { p in
+                                    p.move(to: pts[run.start])
+                                    for i in (run.start + 1)...run.end { p.addLine(to: pts[i]) }
+                                }
+                                .stroke(c.opacity(0.9), style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func renderedPoints(now: Date) -> [MemoryPoint] {
+        guard let latest = points.last else { return [] }
+        let windowStart = now.addingTimeInterval(-windowSeconds)
+        var visible = points.filter { $0.capturedAt >= windowStart && $0.capturedAt <= now }
+        if let previous = points.last(where: { $0.capturedAt < windowStart }) {
+            visible.insert(previous, at: 0)
+        }
+        if latest.capturedAt < now {
+            visible.append(MemoryPoint(ratio: latest.ratio, level: latest.level, capturedAt: now))
+        }
+        return visible
+    }
+
+    /// Consecutive points sharing a pressure level become one run. Runs overlap by one point
+    /// at boundaries so the line stays visually continuous.
+    private func colorRuns(for points: [MemoryPoint]) -> [(start: Int, end: Int, level: Int32)] {
+        guard points.count > 1 else { return [] }
+        var runs: [(start: Int, end: Int, level: Int32)] = []
+        var start = 0
+        for i in 1..<points.count {
+            if points[i].level != points[start].level {
+                runs.append((start, i, points[start].level)) // include boundary point i
+                start = i
+            }
+        }
+        runs.append((start, points.count - 1, points[start].level))
+        return runs
+    }
+}
+
+private struct SubscriptionCardStack: View {
+    @ObservedObject var manager: QuotaManager
+    @ObservedObject var apiKeyManager: APIKeyManager
+    @ObservedObject var refreshCadence: RefreshCadence
+    @ObservedObject var memoryMonitor: MemoryMonitorController
+    @ObservedObject var trafficLight: CodexTrafficLightController
+    @ObservedObject var claudeActivity: ClaudeActivityController
+    /// When provided and there are no Codex slots, shows the import-prompt card (popover only).
+    var importAccount: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            MemoryCardView(monitor: memoryMonitor)
+            if manager.slots.isEmpty, let importAccount {
+                EmptyMonitorCard(importAccount: importAccount)
+            }
+            ForEach(manager.slots) { slot in
+                FloatingSlotCard(
+                    slot: slot,
+                    refreshCadence: refreshCadence,
+                    isRefreshing: manager.refreshingSlotIDs.contains(slot.slotID),
+                    taskColor: Color(nsColor: trafficLight.mode.color),
+                    taskRunning: trafficLight.mode == .running,
+                    taskLabel: trafficLight.mode.label,
+                    refresh: { Task { await manager.refreshSlot(slot.slotID) } }
+                )
+                .frame(minHeight: 70)
+            }
+            FloatingProviderCard(
+                title: "Claude",
+                color: Color(hex: "#E05A2B") ?? .orange,
+                subtitleLabel: "套餐",
+                subtitle: claudeSubtitle,
+                primaryLabel: "5小时", primaryValue: apiRemaining(.claude),
+                primaryMeterLabel: floatingRemainingLabel(apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["fiveHourResetsAt"]),
+                secondaryLabel: "每周", secondaryValue: claudeWeeklyRemaining,
+                secondaryMeterLabel: floatingRemainingLabel(apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["sevenDayResetsAt"]),
+                tertiaryLabel: claudeRoutine != nil ? "Routine" : nil, tertiaryValue: claudeRoutineRemaining,
+                tertiaryMeterLabel: claudeRoutine != nil ? claudeRoutineMeterLabel : nil,
+                resetLines: claudeResetLines,
+                refreshCadence: refreshCadence,
+                isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.claude),
+                refresh: { Task { await apiKeyManager.refreshProvider(.claude) } }
+            )
+            .frame(minHeight: 82)
+            FloatingProviderCard(
+                title: "MiniMax",
+                color: Color(hex: "#7C3AED") ?? .purple,
+                subtitleLabel: "模型",
+                subtitle: minimaxSubtitle,
+                primaryLabel: "5小时", primaryValue: apiRemaining(.minimax),
+                primaryMeterLabel: minimaxFloatingRemainingLabel,
+                secondaryLabel: "每周", secondaryValue: apiWeeklyRemaining(.minimax),
+                secondaryMeterLabel: "未提供",
+                resetLines: minimaxResetLines,
+                refreshCadence: refreshCadence,
+                isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.minimax),
+                refresh: { Task { await apiKeyManager.refreshProvider(.minimax) } }
+            )
+            .frame(minHeight: 78)
+
+            if let provider = apiProvider(.deepseek) {
+                FloatingAPIBalanceCard(
+                    provider: provider,
+                    refreshCadence: refreshCadence,
+                    isRefreshing: apiKeyManager.refreshingProviderIDs.contains(provider.id),
+                    refresh: { Task { await apiKeyManager.refreshProvider(provider.id) } }
+                )
+            }
+            if let provider = apiProvider(.comfly) {
+                FloatingAPIBalanceCard(
+                    provider: provider,
+                    refreshCadence: refreshCadence,
+                    isRefreshing: apiKeyManager.refreshingProviderIDs.contains(provider.id),
+                    refresh: { Task { await apiKeyManager.refreshProvider(provider.id) } }
+                )
+            }
+        }
+    }
+
+    private func apiRemaining(_ providerID: APIKeyProviderID) -> Int? {
+        guard let provider = apiKeyManager.providers.first(where: { $0.id == providerID }),
+              let snapshot = provider.lastSnapshot
+        else { return nil }
+        switch providerID {
+        case .deepseek:
+            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        case .minimax:
+            return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        case .comfly:
+            return max(0, 100 - snapshot.usedPercent)
+        case .claude:
+            if let val = snapshot.extras["fiveHourUsed"], let used = Int(val) {
+                return max(0, 100 - used)
+            }
+            return max(0, 100 - snapshot.usedPercent)
+        }
+    }
+
+    private func apiWeeklyRemaining(_ providerID: APIKeyProviderID) -> Int? {
+        guard let provider = apiKeyManager.providers.first(where: { $0.id == providerID }),
+              let snapshot = provider.lastSnapshot
+        else { return nil }
+        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "")
+    }
+
+    private func apiProvider(_ providerID: APIKeyProviderID) -> APIKeyProviderConfig? {
+        apiKeyManager.providers.first(where: { $0.id == providerID })
+    }
+
+    private var claudeWeeklyRemaining: Int? {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot,
+              let val = snapshot.extras["sevenDayUsed"], let used = Int(val)
+        else { return nil }
+        return max(0, 100 - used)
+    }
+
+    private var claudeRoutine: (used: Int, total: Int)? {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot,
+              let total = Int(snapshot.extras["routineTotal"] ?? ""), total > 0
+        else { return nil }
+        return (Int(snapshot.extras["routineUsed"] ?? "0") ?? 0, total)
+    }
+
+    private var claudeRoutineRemaining: Int? {
+        guard let r = claudeRoutine else { return nil }
+        return max(0, min(100, Int((Double(r.total - r.used) / Double(r.total) * 100).rounded())))
+    }
+
+    private var claudeRoutineMeterLabel: String {
+        guard let r = claudeRoutine else { return "--" }
+        return "今日 \(r.used)/\(r.total) 次"
+    }
+
+    private var claudeSubtitle: String? {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot else {
+            return "从 Claude Desktop 自动同步"
+        }
+        return snapshot.extras["planName"].map(displayPlanName) ?? snapshot.extras["billingStatus"]
+    }
+
+    private var claudeResetLines: [String] {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot else { return [] }
+        var lines: [String] = []
+        lines.append("5小时 \(floatingAbsoluteReset(snapshot.extras["fiveHourResetsAt"]))")
+        lines.append("每周 \(floatingAbsoluteReset(snapshot.extras["sevenDayResetsAt"]))")
+        if let r = claudeRoutine {
+            lines.append("Routine 今日 \(r.used)/\(r.total) 次")
+        }
+        return lines
+    }
+
+    private var minimaxSubtitle: String? {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else {
+            return "等待 MiniMax 数据"
+        }
+        if let planName = snapshot.extras["planName"]?.trimmingCharacters(in: .whitespacesAndNewlines), !planName.isEmpty {
+            return displayPlanName(planName)
+        }
+        if let modelName = snapshot.extras["modelName"] {
+            return modelName
+        }
+        let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
+        return "每周额度 \(weekly)"
+    }
+
+    private var minimaxResetLines: [String] {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return [] }
+        let intervalLine: String
+        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
+            intervalLine = "5小时 \(QuotaFormatters.absoluteResetText(date))"
+        } else if let remains = snapshot.extras["intervalRemainsTime"] {
+            intervalLine = "5小时 \(remains)后重置"
+        } else {
+            intervalLine = "5小时 重置时间 --"
+        }
+        return [intervalLine, "每周 重置时间接口未提供"]
+    }
+
+    private func floatingAbsoluteReset(_ iso: String?, fallback: String? = nil) -> String {
+        if let iso, let date = DateCoding.parseISO8601(iso) {
+            return QuotaFormatters.absoluteResetText(date)
+        }
+        return fallback ?? "重置时间 --"
+    }
+
+    private func floatingRemainingLabel(_ iso: String?, fallback: String? = nil) -> String {
+        if let iso, let date = DateCoding.parseISO8601(iso) {
+            return QuotaFormatters.compactRemainingDurationText(date)
+        }
+        return fallback ?? "--"
+    }
+
+    private var minimaxFloatingRemainingLabel: String {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return "--" }
+        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
+            return QuotaFormatters.compactRemainingDurationText(date)
+        }
+        return snapshot.extras["intervalRemainsTime"] ?? "--"
+    }
+}
+
 private struct FloatingDesktopWidgetView: View {
     @ObservedObject var manager: QuotaManager
     @ObservedObject var apiKeyManager: APIKeyManager
+    @ObservedObject var refreshCadence: RefreshCadence
+    @ObservedObject var memoryMonitor: MemoryMonitorController
+    @ObservedObject var trafficLight: CodexTrafficLightController
+    @ObservedObject var claudeActivity: ClaudeActivityController
+    var onPinChanged: () -> Void = {}
+    @AppStorage("desktopWidgetPinned") private var isPinned = false
     @State private var copiedProviderID: APIKeyProviderID?
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { _ in
+        // 10s tick is enough to refresh absolute reset labels; the countdown ring and the
+        // memory/traffic-light cards update on their own (own ticker / @Published), so a
+        // per-second full redraw of the whole card stack is wasteful.
+        TimelineView(.periodic(from: .now, by: 10)) { _ in
             ZStack {
                 VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
                 LinearGradient(
@@ -1594,64 +2204,14 @@ private struct FloatingDesktopWidgetView: View {
                     floatingHeader
 
                     ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(manager.slots) { slot in
-                                FloatingSlotCard(
-                                    slot: slot,
-                                    isRefreshing: manager.refreshingSlotIDs.contains(slot.slotID),
-                                    refresh: { Task { await manager.refreshSlot(slot.slotID) } }
-                                )
-                                .frame(minHeight: 70)
-                            }
-                            FloatingProviderCard(
-                                title: "Claude",
-                                color: Color(hex: "#E05A2B") ?? .orange,
-                                subtitleLabel: "套餐",
-                                subtitle: claudeSubtitle,
-                                primaryLabel: "5小时", primaryValue: apiRemaining(.claude),
-                                primaryMeterLabel: floatingRemainingLabel(apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["fiveHourResetsAt"]),
-                                secondaryLabel: "每周", secondaryValue: claudeWeeklyRemaining,
-                                secondaryMeterLabel: floatingRemainingLabel(apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["sevenDayResetsAt"]),
-                                tertiaryLabel: "Design", tertiaryValue: claudeDesignRemaining,
-                                tertiaryMeterLabel: floatingRemainingLabel(apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["designResetsAt"], fallback: apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["designResetLabel"]),
-                                resetLines: claudeResetLines,
-                                updatedText: providerUpdatedText(.claude),
-                                isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.claude),
-                                refresh: { Task { await apiKeyManager.refreshProvider(.claude) } }
-                            )
-                            .frame(minHeight: 82)
-                            FloatingProviderCard(
-                                title: "MiniMax",
-                                color: Color(hex: "#7C3AED") ?? .purple,
-                                subtitleLabel: "模型",
-                                subtitle: minimaxSubtitle,
-                                primaryLabel: "5小时", primaryValue: apiRemaining(.minimax),
-                                primaryMeterLabel: minimaxFloatingRemainingLabel,
-                                secondaryLabel: "每周", secondaryValue: apiWeeklyRemaining(.minimax),
-                                secondaryMeterLabel: "未提供",
-                                resetLines: minimaxResetLines,
-                                updatedText: providerUpdatedText(.minimax),
-                                isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.minimax),
-                                refresh: { Task { await apiKeyManager.refreshProvider(.minimax) } }
-                            )
-                            .frame(minHeight: 78)
-
-                            if let provider = apiProvider(.deepseek) {
-                                FloatingAPIBalanceCard(
-                                    provider: provider,
-                                    isRefreshing: apiKeyManager.refreshingProviderIDs.contains(provider.id),
-                                    refresh: { Task { await apiKeyManager.refreshProvider(provider.id) } }
-                                )
-                            }
-                            if let provider = apiProvider(.comfly) {
-                                FloatingAPIBalanceCard(
-                                    provider: provider,
-                                    isRefreshing: apiKeyManager.refreshingProviderIDs.contains(provider.id),
-                                    refresh: { Task { await apiKeyManager.refreshProvider(provider.id) } }
-                                )
-                            }
-                                }
-                        .padding(.bottom, 0)
+                        SubscriptionCardStack(
+                            manager: manager,
+                            apiKeyManager: apiKeyManager,
+                            refreshCadence: refreshCadence,
+                            memoryMonitor: memoryMonitor,
+                            trafficLight: trafficLight,
+                            claudeActivity: claudeActivity
+                        )
                     }
 
                     HStack(spacing: 8) {
@@ -1672,7 +2232,8 @@ private struct FloatingDesktopWidgetView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .frame(width: 396, height: 596)
+        .frame(minWidth: DesktopWidgetFrameStore.minimumSize.width, minHeight: DesktopWidgetFrameStore.minimumSize.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.10), lineWidth: 0.8))
         .shadow(color: .black.opacity(0.42), radius: 18, y: 10)
@@ -1703,7 +2264,21 @@ private struct FloatingDesktopWidgetView: View {
                 .foregroundStyle(.white.opacity(0.34))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 138, alignment: .trailing)
+                .frame(maxWidth: 110, alignment: .trailing)
+
+            Button {
+                isPinned.toggle()
+                onPinChanged()
+            } label: {
+                Image(systemName: isPinned ? "pin.fill" : "pin.slash")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(isPinned ? Color(red: 0.19, green: 0.78, blue: 0.86) : .white.opacity(0.5))
+                    .frame(width: 18, height: 16)
+                    .background(Color.white.opacity(isPinned ? 0.12 : 0.055), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.06), lineWidth: 0.7))
+            }
+            .buttonStyle(.borderless)
+            .help(isPinned ? "取消置顶" : "置顶")
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
@@ -1757,146 +2332,6 @@ private struct FloatingDesktopWidgetView: View {
         }
     }
 
-    private func metric(_ kind: QuotaWindowKind) -> Int? {
-        manager.slots.compactMap(\.lastSnapshot).flatMap(\.quotaWindows).first(where: { $0.kind == kind })?.remainingPercent
-    }
-
-    private var updatedText: String {
-        guard let updatedAt = manager.slots.compactMap(\.lastSnapshot).first?.updatedAt else {
-            return "尚未更新"
-        }
-        return QuotaFormatters.updatedText(updatedAt)
-    }
-
-    private func apiRemaining(_ providerID: APIKeyProviderID) -> Int? {
-        guard let provider = apiKeyManager.providers.first(where: { $0.id == providerID }),
-              let snapshot = provider.lastSnapshot
-        else { return nil }
-
-        switch providerID {
-        case .deepseek:
-            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
-        case .minimax:
-            return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
-        case .comfly:
-            return max(0, 100 - snapshot.usedPercent)
-        case .claude:
-            if let val = snapshot.extras["fiveHourUsed"], let used = Int(val) {
-                return max(0, 100 - used)
-            }
-            return max(0, 100 - snapshot.usedPercent)
-        }
-    }
-
-    private func apiWeeklyRemaining(_ providerID: APIKeyProviderID) -> Int? {
-        guard let provider = apiKeyManager.providers.first(where: { $0.id == providerID }),
-              let snapshot = provider.lastSnapshot
-        else { return nil }
-        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "")
-    }
-
-    private func apiProvider(_ providerID: APIKeyProviderID) -> APIKeyProviderConfig? {
-        apiKeyManager.providers.first(where: { $0.id == providerID })
-    }
-
-    private func providerUpdatedText(_ providerID: APIKeyProviderID) -> String? {
-        guard let updatedAt = apiProvider(providerID)?.lastSnapshot?.updatedAt else { return nil }
-        return QuotaFormatters.updatedText(updatedAt)
-    }
-
-    private var claudeWeeklyRemaining: Int? {
-        guard let provider = apiKeyManager.providers.first(where: { $0.id == .claude }),
-              let snapshot = provider.lastSnapshot,
-              let val = snapshot.extras["sevenDayUsed"],
-              let used = Int(val)
-        else { return nil }
-        return max(0, 100 - used)
-    }
-
-    private var claudeDesignRemaining: Int? {
-        guard let provider = apiKeyManager.providers.first(where: { $0.id == .claude }),
-              let snapshot = provider.lastSnapshot,
-              let val = snapshot.extras["designUsed"],
-              let used = Int(val)
-        else { return nil }
-        return max(0, 100 - used)
-    }
-
-    private var claudeSubtitle: String? {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot else {
-            return "从 Claude Desktop 自动同步"
-        }
-        return snapshot.extras["planName"].map(displayPlanName) ?? snapshot.extras["billingStatus"]
-    }
-
-    private var claudeResetLines: [String] {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .claude })?.lastSnapshot else { return [] }
-        var lines: [String] = []
-        lines.append("5小时 \(floatingAbsoluteReset(snapshot.extras["fiveHourResetsAt"]))")
-        lines.append("每周 \(floatingAbsoluteReset(snapshot.extras["sevenDayResetsAt"]))")
-        if snapshot.extras["designUsed"] != nil {
-            lines.append("Design \(floatingAbsoluteReset(snapshot.extras["designResetsAt"], fallback: snapshot.extras["designResetLabel"]))")
-        }
-        return lines
-    }
-
-    private var minimaxSubtitle: String? {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else {
-            return "等待 MiniMax 数据"
-        }
-        if let planName = snapshot.extras["planName"]?.trimmingCharacters(in: .whitespacesAndNewlines), !planName.isEmpty {
-            return displayPlanName(planName)
-        }
-        if let modelName = snapshot.extras["modelName"] {
-            return modelName
-        }
-        let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
-        return "每周额度 \(weekly)"
-    }
-
-    private var minimaxResetLines: [String] {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return [] }
-        let intervalLine: String
-        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
-            intervalLine = "5小时 \(QuotaFormatters.absoluteResetText(date))"
-        } else if let remains = snapshot.extras["intervalRemainsTime"] {
-            intervalLine = "5小时 \(remains)后重置"
-        } else {
-            intervalLine = "5小时 重置时间 --"
-        }
-        return [intervalLine, "每周 重置时间接口未提供"]
-    }
-
-    private var deepseekSubtitle: String? {
-        apiKeyManager.providers.first(where: { $0.id == .deepseek })?.lastSnapshot?.balance
-    }
-
-    private var comflySubtitle: String? {
-        apiKeyManager.providers.first(where: { $0.id == .comfly })?.lastSnapshot?.extras["balanceYuan"]
-    }
-
-    private func floatingAbsoluteReset(_ iso: String?, fallback: String? = nil) -> String {
-        if let iso, let date = DateCoding.parseISO8601(iso) {
-            return QuotaFormatters.absoluteResetText(date)
-        }
-        return fallback ?? "重置时间 --"
-    }
-
-    private func floatingRemainingLabel(_ iso: String?, fallback: String? = nil) -> String {
-        if let iso, let date = DateCoding.parseISO8601(iso) {
-            return QuotaFormatters.compactRemainingDurationText(date)
-        }
-        return fallback ?? "--"
-    }
-
-    private var minimaxFloatingRemainingLabel: String {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return "--" }
-        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
-            return QuotaFormatters.compactRemainingDurationText(date)
-        }
-        return snapshot.extras["intervalRemainsTime"] ?? "--"
-    }
-
     private func copyKey(_ providerID: APIKeyProviderID) {
         let value = apiKeyManager.primaryCopyValue(providerID: providerID)
         guard !value.isEmpty else { return }
@@ -1906,9 +2341,57 @@ private struct FloatingDesktopWidgetView: View {
     }
 }
 
+/// Breathing opacity computed from a low-rate TimelineView (no repeatForever → no 60fps
+/// full-tree re-render). Only this tiny shape re-renders ~8×/sec while running.
+private func breathingOpacity(_ date: Date, low: Double, high: Double, period: Double = 1.9) -> Double {
+    let t = date.timeIntervalSinceReferenceDate
+    let phase = 0.5 + 0.5 * sin(t * 2 * Double.pi / period)
+    return low + (high - low) * phase
+}
+
+private struct BreathingBorder: View {
+    let color: Color
+    let running: Bool
+    var cornerRadius: CGFloat = 12
+
+    var body: some View {
+        if running {
+            TimelineView(.periodic(from: .now, by: 0.12)) { ctx in
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .stroke(color, lineWidth: 1.4)
+                    .opacity(breathingOpacity(ctx.date, low: 0.30, high: 0.95))
+            }
+        } else {
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .stroke(color, lineWidth: 1.0)
+                .opacity(0.5)
+        }
+    }
+}
+
+private struct BreathingDot: View {
+    let color: Color
+    let running: Bool
+
+    var body: some View {
+        if running {
+            TimelineView(.periodic(from: .now, by: 0.12)) { ctx in
+                Circle().fill(color).frame(width: 7, height: 7)
+                    .opacity(breathingOpacity(ctx.date, low: 0.4, high: 1.0))
+            }
+        } else {
+            Circle().fill(color).frame(width: 7, height: 7)
+        }
+    }
+}
+
 private struct FloatingSlotCard: View {
     let slot: AccountSlot
+    @ObservedObject var refreshCadence: RefreshCadence
     let isRefreshing: Bool
+    var taskColor: Color = Color(red: 0.00, green: 0.82, blue: 0.95)
+    var taskRunning: Bool = false
+    var taskLabel: String = ""
     let refresh: () -> Void
     private let accent = Color(red: 0.00, green: 0.82, blue: 0.95)
 
@@ -1921,8 +2404,8 @@ private struct FloatingSlotCard: View {
             if let snap = slot.lastSnapshot, !snap.quotaWindows.isEmpty {
                 ForEach(snap.quotaWindows) { window in
                     metricLine(
-                        title: window.kind == .session ? "5小时" : "每周",
-                        value: shortFloatingResetText(for: window),
+                        title: codexWindowMetricTitle(window),
+                        value: codexWindowMetricValue(window),
                         meterLabel: QuotaFormatters.compactRemainingDurationText(window.resetAt),
                         percent: window.remainingPercent
                     )
@@ -1945,24 +2428,25 @@ private struct FloatingSlotCard: View {
             ),
             in: RoundedRectangle(cornerRadius: 12)
         )
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(accent.opacity(0.24), lineWidth: 0.9))
-        .shadow(color: accent.opacity(0.08), radius: 4, y: 2)
+        .overlay(BreathingBorder(color: taskColor, running: taskRunning, cornerRadius: 12))
+        .shadow(color: taskColor.opacity(0.14), radius: 4, y: 2)
     }
 
     private var headerRow: some View {
         HStack(spacing: 6) {
-            Circle().fill(accent).frame(width: 6, height: 6)
+            BreathingDot(color: taskColor, running: taskRunning)
             Text("Codex")
                 .font(.custom("Avenir Next Demi Bold", size: 14))
                 .foregroundStyle(.white.opacity(0.94))
                 .lineLimit(1)
+            if !taskLabel.isEmpty {
+                Text(taskLabel)
+                    .font(.custom("Avenir Next Medium", size: 9))
+                    .foregroundStyle(taskColor.opacity(0.9))
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
-            Text(updatedText)
-                .font(.custom("Avenir Next Medium", size: 8))
-                .foregroundStyle(.white.opacity(0.30))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            FloatingRefreshButton(isRefreshing: isRefreshing, action: refresh)
+            FloatingRefreshProgress(cadence: refreshCadence, isRefreshing: isRefreshing, action: refresh)
         }
     }
 
@@ -2042,6 +2526,74 @@ private struct FloatingRefreshButton: View {
     }
 }
 
+private struct FloatingRefreshProgress: View {
+    @ObservedObject var cadence: RefreshCadence
+    let isRefreshing: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+    private let color = Color(red: 0.19, green: 0.78, blue: 0.86)
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let state = progressState(now: timeline.date)
+            HStack(spacing: 5) {
+                Text(state.label)
+                    .font(.custom("Avenir Next Demi Bold", size: 7.5))
+                    .foregroundStyle(.white.opacity(isRefreshing || cadence.isRefreshing ? 0.52 : 0.34))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .frame(width: 34, alignment: .trailing)
+
+                Button(action: action) {
+                    ZStack {
+                        Circle()
+                            .fill(.white.opacity(isHovering ? 0.07 : 0.02))
+                        Circle()
+                            .stroke(.white.opacity(isHovering ? 0.16 : 0.09), lineWidth: 1.5)
+                        Circle()
+                            .trim(from: 0, to: state.progress)
+                            .stroke(
+                                color.opacity(isHovering ? 1 : 0.92),
+                                style: StrokeStyle(lineWidth: isHovering ? 2 : 1.7, lineCap: .round)
+                            )
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 0.2), value: state.progress)
+                    }
+                    .frame(width: 15, height: 15)
+                    .scaleEffect(isHovering ? 1.13 : 1)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isHovering)
+                }
+                .buttonStyle(.borderless)
+                .disabled(isRefreshing)
+                .onHover { hovering in
+                    isHovering = hovering
+                }
+                .help("刷新")
+            }
+        }
+        .frame(width: 55, height: 18)
+        .help("下次自动刷新")
+    }
+
+    private func progressState(now: Date) -> (label: String, progress: CGFloat) {
+        if isRefreshing || cadence.isRefreshing {
+            return ("刷新中", 1)
+        }
+
+        let remaining = max(0, cadence.nextRefreshAt.timeIntervalSince(now))
+        let progress = min(1, max(0, (cadence.intervalSeconds - remaining) / cadence.intervalSeconds))
+        return (countdownText(remaining), CGFloat(progress))
+    }
+
+    private func countdownText(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded(.up)))
+        if total >= 60 {
+            return "\(total / 60)m\(String(format: "%02d", total % 60))s"
+        }
+        return "\(total)s"
+    }
+}
+
 private struct FloatingProviderCard: View {
     let title: String
     let color: Color
@@ -2057,7 +2609,10 @@ private struct FloatingProviderCard: View {
     var tertiaryValue: Int? = nil
     var tertiaryMeterLabel: String? = nil
     var resetLines: [String] = []
-    var updatedText: String? = nil
+    var statusColor: Color? = nil      // when set, header dot + border breathe with this color
+    var statusRunning: Bool = false
+    var statusLabel: String? = nil
+    @ObservedObject var refreshCadence: RefreshCadence
     let isRefreshing: Bool
     let refresh: () -> Void
 
@@ -2086,26 +2641,38 @@ private struct FloatingProviderCard: View {
             ),
             in: RoundedRectangle(cornerRadius: 12)
         )
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.22), lineWidth: 0.9))
-        .shadow(color: color.opacity(0.08), radius: 4, y: 2)
+        .overlay(borderOverlay)
+        .shadow(color: (statusColor ?? color).opacity(0.1), radius: 4, y: 2)
+    }
+
+    @ViewBuilder
+    private var borderOverlay: some View {
+        if let statusColor {
+            BreathingBorder(color: statusColor, running: statusRunning, cornerRadius: 12)
+        } else {
+            RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.22), lineWidth: 0.9)
+        }
     }
 
     private var headerRow: some View {
         HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 6, height: 6)
+            if let statusColor {
+                BreathingDot(color: statusColor, running: statusRunning)
+            } else {
+                Circle().fill(color).frame(width: 6, height: 6)
+            }
             Text(title)
                 .font(.custom("Avenir Next Demi Bold", size: 14))
                 .foregroundStyle(.white.opacity(0.94))
                 .lineLimit(1)
-            Spacer(minLength: 0)
-            if let updatedText {
-                Text(updatedText)
-                    .font(.custom("Avenir Next Medium", size: 8))
-                    .foregroundStyle(.white.opacity(0.30))
+            if let statusLabel {
+                Text(statusLabel)
+                    .font(.custom("Avenir Next Medium", size: 9))
+                    .foregroundStyle((statusColor ?? color).opacity(0.9))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.75)
             }
-            FloatingRefreshButton(isRefreshing: isRefreshing, action: refresh)
+            Spacer(minLength: 0)
+            FloatingRefreshProgress(cadence: refreshCadence, isRefreshing: isRefreshing, action: refresh)
         }
     }
 
@@ -2211,6 +2778,7 @@ private struct FloatingCompactBar: View {
 
 private struct FloatingAPIBalanceCard: View {
     let provider: APIKeyProviderConfig
+    @ObservedObject var refreshCadence: RefreshCadence
     let isRefreshing: Bool
     let refresh: () -> Void
 
@@ -2225,12 +2793,7 @@ private struct FloatingAPIBalanceCard: View {
                     .foregroundStyle(.white.opacity(0.94))
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Text(updatedText)
-                    .font(.custom("Avenir Next Medium", size: 8))
-                    .foregroundStyle(.white.opacity(0.30))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                FloatingRefreshButton(isRefreshing: isRefreshing, action: refresh)
+                FloatingRefreshProgress(cadence: refreshCadence, isRefreshing: isRefreshing, action: refresh)
             }
 
             if let balanceLine = balanceLineText {
@@ -2336,10 +2899,6 @@ private struct FloatingAPIBalanceCard: View {
         }
     }
 
-    private var updatedText: String {
-        guard let updatedAt = provider.lastSnapshot?.updatedAt else { return "未更新" }
-        return QuotaFormatters.updatedText(updatedAt)
-    }
 }
 
 private enum MainCardGrid {
@@ -2411,6 +2970,31 @@ private func displayPlanName(_ raw: String) -> String {
     default:
         let sanitized = raw.replacingOccurrences(of: "_", with: " ")
         return sanitized.isEmpty ? raw : sanitized.capitalized
+    }
+}
+
+private func codexWindowMetricTitle(_ window: QuotaWindow) -> String {
+    if window.title.hasPrefix("Spark") {
+        return "Spark"
+    }
+
+    switch window.kind {
+    case .session: return "5小时"
+    case .weekly: return "每周"
+    case .credits: return "余额"
+    case .unknown: return window.title
+    }
+}
+
+private func codexWindowMetricValue(_ window: QuotaWindow) -> String {
+    let resetText = QuotaFormatters.absoluteResetText(window.resetAt)
+    switch window.title {
+    case "Spark 5小时":
+        return "5小时 \(resetText)"
+    case "Spark 每周":
+        return "每周 \(resetText)"
+    default:
+        return resetText
     }
 }
 
@@ -2631,6 +3215,11 @@ private struct IconButton: View {
 
 private struct APIKeySettingsView: View {
     @ObservedObject var manager: APIKeyManager
+    @ObservedObject var quotaManager: QuotaManager
+    var openDataFolder: () -> Void = {}
+    var applyStatusBarVisibility: () -> Void = {}
+    @AppStorage("showCodexTrafficLight") private var showTrafficLight = true
+    @AppStorage("showMemoryIndicator") private var showMemory = true
     @State private var drafts: [String: String] = [:]
     @State private var copiedField: String?
 
@@ -2639,6 +3228,8 @@ private struct APIKeySettingsView: View {
             header
             ScrollView {
                 VStack(spacing: 12) {
+                    statusBarCard
+                    CodexAccountEditor(manager: quotaManager)
                     ForEach(manager.providers) { provider in
                         APIKeyProviderEditor(
                             provider: provider,
@@ -2656,21 +3247,56 @@ private struct APIKeySettingsView: View {
         }
         .frame(minWidth: 620, minHeight: 480)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear(perform: reloadDrafts)
+        .onAppear {
+            reloadDrafts()
+            quotaManager.load()
+        }
+    }
+
+    private var statusBarCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "menubar.rectangle")
+                    .foregroundStyle(.secondary)
+                Text("状态栏显示")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+            }
+            Toggle(isOn: Binding(get: { showTrafficLight }, set: { showTrafficLight = $0; applyStatusBarVisibility() })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Codex 状态灯").font(.system(size: 13))
+                    Text("🟡执行中 · 🟢已完成 · 🔴异常,数据来自 ~/.codex 会话").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            Toggle(isOn: Binding(get: { showMemory }, set: { showMemory = $0; applyStatusBarVisibility() })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("系统内存").font(.system(size: 13))
+                    Text("菜单栏显示内存折线胶囊 + 已用 GB").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
     }
 
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("API Key 与余额")
+                Text("设置")
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
-                Text("所有余额能力都会固定展示。Claude 从 Claude Desktop 自动读取登录态，其余密钥保存到 macOS Keychain。")
+                Text("Codex 与 Claude 自动读取本机登录态，其余密钥保存到 macOS Keychain。")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button(action: openDataFolder) {
+                Label("数据文件夹", systemImage: "folder")
+            }
             Button {
-                Task { await manager.refreshAll() }
+                Task { await manager.refreshAll(); await quotaManager.refreshAll() }
             } label: {
                 Label("刷新余额", systemImage: "arrow.clockwise")
             }
@@ -2721,6 +3347,164 @@ private struct APIKeySettingsView: View {
     }
 }
 
+private struct CodexAccountEditor: View {
+    @ObservedObject var manager: QuotaManager
+
+    private let accent = Color(red: 0.00, green: 0.82, blue: 0.95)
+
+    private var slot: AccountSlot? { manager.slots.first(where: { $0.isActive }) ?? manager.slots.first }
+    private var snapshot: QuotaSnapshot? { slot?.lastSnapshot }
+    private var sessionRemaining: Int {
+        snapshot?.quotaWindows.first(where: { $0.kind == .session })?.remainingPercent ?? snapshot?.remaining ?? 0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Circle().fill(accent).frame(width: 10, height: 10)
+                Text("Codex")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Spacer()
+                if let slot {
+                    Toggle("启用", isOn: Binding(
+                        get: { slot.isActive },
+                        set: { manager.setSlotActive(slot.slotID, isActive: $0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                }
+            }
+
+            HStack(alignment: .top, spacing: 14) {
+                codexInfoBox
+                    .frame(maxWidth: .infinity)
+                codexBalanceBox
+                    .frame(width: 224)
+            }
+
+            HStack {
+                Button {
+                    manager.importCurrentCodexAccount()
+                    Task { await manager.refreshAll() }
+                } label: {
+                    Label("导入当前登录", systemImage: "person.crop.circle.badge.plus")
+                }
+                Button {
+                    Task { await manager.refreshAll() }
+                } label: {
+                    Label("刷新余额", systemImage: "arrow.clockwise")
+                }
+                .disabled(manager.isRefreshing)
+                Spacer()
+                Text("Codex 令牌同步到钥匙串用于自动续期，不写入本地配置明文")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
+    }
+
+    private var codexInfoBox: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("自动登录态来源", systemImage: "desktopcomputer")
+                .font(.system(size: 12, weight: .semibold))
+            Text("Codex 余额从本机 ~/.codex 登录态自动读取，令牌同步到钥匙串用于自动续期，无需手动填写。")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            Divider()
+            if let slot {
+                statusLine("当前账号", slot.displayName)
+                statusLine("账号 ID", slot.accountID ?? slot.accountKey)
+                if let updatedAt = snapshot?.updatedAt {
+                    statusLine("更新时间", QuotaFormatters.updatedText(updatedAt).replacingOccurrences(of: "updated ", with: "更新 "))
+                }
+            } else {
+                statusLine("当前状态", "尚未导入")
+                statusLine("操作", "点击下方「导入当前登录」")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(11)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var codexBalanceBox: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("余额")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(snapshot?.extras["planType"].map(displayPlanName) ?? "等待同步")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text("会话剩余 \(sessionRemaining)%")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            ProgressView(value: Double(sessionRemaining), total: 100)
+                .tint(accent)
+            if let snapshot, !snapshot.quotaWindows.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(snapshot.quotaWindows) { window in
+                        codexStat(codexWindowLabel(window), "\(window.remainingPercent)%\(codexWindowResetSuffix(window))")
+                    }
+                    if let credits = snapshot.extras["creditsBalance"] {
+                        codexStat("余额", credits)
+                    }
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func codexWindowLabel(_ window: QuotaWindow) -> String {
+        if window.title.hasPrefix("Spark") { return window.title }
+        switch window.kind {
+        case .session: return "5小时"
+        case .weekly: return "每周"
+        default: return window.title
+        }
+    }
+
+    private func codexWindowResetSuffix(_ window: QuotaWindow) -> String {
+        guard let resetAt = window.resetAt else { return "" }
+        let text = QuotaFormatters.compactRemainingDurationText(resetAt)
+        return text.isEmpty ? "" : " · \(text)"
+    }
+
+    private func statusLine(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 60, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func codexStat(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.system(size: 11))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+    }
+}
+
 private struct APIKeyProviderEditor: View {
     let provider: APIKeyProviderConfig
     @Binding var values: [String: String]
@@ -2739,7 +3523,7 @@ private struct APIKeyProviderEditor: View {
                 Text(provider.displayName)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                 Spacer()
-                Toggle("启用", isOn: Binding(get: { provider.isEnabled }, set: setEnabled))
+                Toggle("启用", isOn: Binding(get: { provider.isEnabled }, set: { value in setEnabled(value) }))
                     .toggleStyle(.switch)
                     .font(.system(size: 12))
             }
@@ -2761,7 +3545,12 @@ private struct APIKeyProviderEditor: View {
             }
 
             HStack {
-                if provider.id != .claude {
+                if provider.id == .claude {
+                    Button(action: refresh) {
+                        Label("同步登录态", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .help("立即从 Claude Desktop 重新读取登录态")
+                } else {
                     Button(action: save) {
                         Label("保存", systemImage: "checkmark.circle")
                     }
@@ -2955,13 +3744,9 @@ private struct APIProviderStatsView: View {
                         let resetStr = snapshot.extras["sevenDayResetsAt"].flatMap { claudeResetLabel($0) } ?? ""
                         stat("每周剩余", "\(remain)%\(resetStr.isEmpty ? "" : " · \(resetStr)")")
                     }
-                    if let design = snapshot.extras["designUsed"] {
-                        let remain = max(0, 100 - (Int(design) ?? 0))
-                        let resetStr = snapshot.extras["designResetsAt"].flatMap { claudeResetLabel($0) }
-                            ?? snapshot.extras["designResetLabel"]
-                            ?? ""
-                        let suffix = snapshot.extras["designNote"].map { " · \($0)" } ?? ""
-                        stat("Design剩余", "\(remain)%\(resetStr.isEmpty ? "" : " · \(resetStr)")\(suffix)")
+                    if let total = snapshot.extras["routineTotal"], let totalNum = Int(total), totalNum > 0 {
+                        let used = Int(snapshot.extras["routineUsed"] ?? "0") ?? 0
+                        stat("Routine", "今日 \(used)/\(totalNum) 次 · 剩 \(max(0, totalNum - used))")
                     }
                     stat("续费", snapshot.extras["billingPeriod"] ?? "--")
                 }
@@ -3075,68 +3860,162 @@ private extension Color {
 // MARK: - Claude WKWebView Fetcher
 
 @MainActor
-private final class ClaudeWebFetcher: NSObject {
+private struct ClaudeCookieInfo {
+    var value: String
+    var domain: String
+    var path: String
+    var isSecure: Bool
+}
+
+private final class ContinuationGate<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: Value) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(throwing: error)
+    }
+}
+
+private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<APIBalanceSnapshot, Error>?
     private var timeoutTimer: Timer?
+    private var resultPollTimer: Timer?
+    private var didStartDataScript = false
     private let balanceProvider = LLMBalanceProvider()
     private let fileManager = FileManager.default
-    private let pythonPath = "/usr/bin/python3"
     private let claudeCookieDBURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Claude/Cookies")
     var onSafeStorageAccessAttempt: (@MainActor () -> Void)?
 
-    func fetchOrganizations() async throws -> APIBalanceSnapshot {
-        let sessionKey = try await prepareClaudeSessionKey()
+    func fetchOrganizations(allowsUserInteraction: Bool) async throws -> APIBalanceSnapshot {
+        // Decrypt all Claude Desktop cookies (Swift-native AES), then load the usage page
+        let claudeCookies = try await prepareAllClaudeCookies(allowsUserInteraction: allowsUserInteraction)
 
-        return try await withCheckedThrowingContinuation { cont in
-            self.continuation = cont
+        return try await withCheckedThrowingContinuation { [self] cont in
+            DispatchQueue.main.async {
+                self.continuation = cont
+                self.didStartDataScript = false
 
-            let config = WKWebViewConfiguration()
-            let ucc = WKUserContentController()
-            ucc.add(self, name: "claudeData")
-            config.userContentController = ucc
+                let config = WKWebViewConfiguration()
 
-            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
-                               styleMask: [], backing: .buffered, defer: false)
-            win.isReleasedWhenClosed = false
-            let wv = WKWebView(frame: win.contentView!.bounds, configuration: config)
-            wv.navigationDelegate = self
-            win.contentView?.addSubview(wv)
-            self.webView = wv
+                let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                                   styleMask: [], backing: .buffered, defer: false)
+                win.isReleasedWhenClosed = false
+                let wv = WKWebView(frame: win.contentView!.bounds, configuration: config)
+                // Match Claude Desktop's Electron User-Agent so Cloudflare honors its cf_clearance cookie.
+                wv.customUserAgent = Self.claudeDesktopUserAgent()
+                wv.navigationDelegate = self
+                win.contentView?.addSubview(wv)
+                self.webView = wv
 
-            // Inject the sessionKey cookie before loading
-            let props: [HTTPCookiePropertyKey: Any] = [
-                .name: "sessionKey",
-                .value: sessionKey,
-                .domain: ".claude.ai",
-                .path: "/",
-                .secure: true,
-            ]
-            if let cookie = HTTPCookie(properties: props) {
-                wv.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
-                    wv.load(URLRequest(url: URL(string: "https://claude.ai/settings/usage")!))
+                // Inject ALL Claude Desktop cookies (incl. cf_clearance + httpOnly sessionKey) into the
+                // WKWebView cookie store so both Cloudflare and claude.ai's client-side auth see a valid
+                // session. Request-header injection alone fails: the SPA re-checks cookies client-side.
+                let store = wv.configuration.websiteDataStore.httpCookieStore
+                let httpOnlyNames: Set<String> = ["sessionKey", "cf_clearance", "__cf_bm", "routingHint"]
+                var httpCookies: [HTTPCookie] = []
+                for (name, info) in claudeCookies {
+                    var props: [HTTPCookiePropertyKey: Any] = [
+                        .name: name, .value: info.value, .domain: info.domain, .path: info.path,
+                    ]
+                    if info.isSecure { props[.secure] = true }
+                    if httpOnlyNames.contains(name) { props[.init(rawValue: "HttpOnly")] = true }
+                    if let cookie = HTTPCookie(properties: props) { httpCookies.append(cookie) }
                 }
-            } else {
-                wv.load(URLRequest(url: URL(string: "https://claude.ai/settings/usage")!))
-            }
 
-            timeoutTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.finish(.failure(ClaudeFetchError.timedOut))
+                let usageURL = URL(string: "https://claude.ai/settings/usage")!
+                var didLoad = false
+                let loadOnce: () -> Void = { [weak wv] in
+                    guard !didLoad else { return }
+                    didLoad = true
+                    wv?.load(URLRequest(url: usageURL))
                 }
+                let group = DispatchGroup()
+                for cookie in httpCookies {
+                    group.enter()
+                    store.setCookie(cookie) { group.leave() }
+                }
+                group.notify(queue: .main) { loadOnce() }
+                // setCookie completion handlers are unreliable on macOS 26 — load anyway after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { loadOnce() }
+
+                let timer = Timer(timeInterval: 90, repeats: false) { [weak self] _ in
+                    DispatchQueue.main.async { self?.finish(.failure(ClaudeFetchError.timedOut)) }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                self.timeoutTimer = timer
             }
         }
     }
 
-    private func prepareClaudeSessionKey() async throws -> String {
+    /// Build a User-Agent matching the installed Claude Desktop's Electron runtime so that the
+    /// cf_clearance cookie (issued to that UA) is accepted by Cloudflare. Versions are read from
+    /// the installed app at runtime, with a sane fallback if extraction fails.
+    private static func claudeDesktopUserAgent() -> String {
+        let fallback = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 Electron/41.6.1 Safari/537.36"
+        let fm = FileManager.default
+        let appPath = ["/Applications/Claude.app",
+                       fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Claude.app").path]
+            .first(where: { fm.fileExists(atPath: $0) })
+        guard let appPath else { return fallback }
+
+        let claudeVersion = (Bundle(path: appPath)?.infoDictionary?["CFBundleShortVersionString"] as? String) ?? ""
+        let electronBinary = "\(appPath)/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+        guard fm.fileExists(atPath: electronBinary),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: electronBinary), options: .mappedIfSafe),
+              let text = String(data: data, encoding: .isoLatin1)
+        else {
+            return fallback
+        }
+
+        func firstMatch(_ pattern: String) -> String? {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+            let range = NSRange(text.startIndex..., in: text)
+            guard let m = re.firstMatch(in: text, range: range), let r = Range(m.range(at: 1), in: text) else { return nil }
+            return String(text[r])
+        }
+
+        guard let chrome = firstMatch("Chrome/([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)"),
+              let electron = firstMatch("Electron/([0-9]+\\.[0-9]+\\.[0-9]+)")
+        else {
+            return fallback
+        }
+
+        let claudePart = claudeVersion.isEmpty ? "" : "Claude/\(claudeVersion) "
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \(claudePart)Chrome/\(chrome) Electron/\(electron) Safari/537.36"
+    }
+
+    private func prepareAllClaudeCookies(allowsUserInteraction: Bool) async throws -> [String: ClaudeCookieInfo] {
         try ensureClaudeDesktopInstalled()
         guard fileManager.fileExists(atPath: claudeCookieDBURL.path) else {
             throw ClaudeFetchError.cookieDatabaseMissing
         }
-        let password = try await loadClaudeSafeStoragePassword()
-        try await ensureCryptographyAvailable()
-        return try await decryptClaudeDesktopSessionKey(password: password)
+        let password = try await loadClaudeSafeStoragePassword(allowsUserInteraction: allowsUserInteraction)
+        let cookies = try extractAllClaudeCookiesSwift(password: password)
+        return cookies
     }
 
     private func ensureClaudeDesktopInstalled() throws {
@@ -3150,86 +4029,190 @@ private final class ClaudeWebFetcher: NSObject {
         throw ClaudeFetchError.notInstalled
     }
 
-    private func loadClaudeSafeStoragePassword() async throws -> String {
-        onSafeStorageAccessAttempt?()
-        let result = try await runProcess(
-            executableURL: URL(fileURLWithPath: "/usr/bin/security"),
-            arguments: ["find-generic-password", "-a", "Claude", "-s", "Claude Safe Storage", "-w"]
-        )
-        guard result.exitCode == 0 else {
-            throw ClaudeFetchError.safeStorageMissing
+    private func loadClaudeSafeStoragePassword(allowsUserInteraction: Bool) async throws -> String {
+        if let cb = onSafeStorageAccessAttempt { await MainActor.run { cb() } }
+
+        if !allowsUserInteraction {
+            return try await loadClaudeSafeStoragePasswordInProcess(allowsUserInteraction: false)
         }
-        let password = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !password.isEmpty else {
-            throw ClaudeFetchError.safeStorageMissing
-        }
-        return password
+
+        // Read the "Claude Safe Storage" password via the /usr/bin/security CLI rather than an
+        // in-process SecItemCopyMatching. The keychain ACL is keyed by the *accessing* binary;
+        // /usr/bin/security is already trusted for this item, so this returns without popping a
+        // per-app authorization dialog and without blocking the app's main run loop.
+        return try await loadClaudeSafeStoragePasswordWithSecurityCLI(timeout: 8)
     }
 
-    private func ensureCryptographyAvailable() async throws {
-        let result = try await runProcess(
-            executableURL: URL(fileURLWithPath: pythonPath),
-            arguments: ["-c", "import cryptography"]
-        )
-        guard result.exitCode == 0 else {
-            if result.stderr.contains("No module named") && result.stderr.contains("cryptography") {
-                throw ClaudeFetchError.cryptographyMissing
+    private func loadClaudeSafeStoragePasswordInProcess(allowsUserInteraction: Bool) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrAccount as String: "Claude",
+                kSecAttrService as String: "Claude Safe Storage",
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            if !allowsUserInteraction {
+                let context = LAContext()
+                context.interactionNotAllowed = true
+                query[kSecUseAuthenticationContext as String] = context
             }
-            throw ClaudeFetchError.pythonUnavailable
+
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound {
+                throw ClaudeFetchError.safeStorageMissing
+            }
+            if !allowsUserInteraction && (status == errSecInteractionNotAllowed || status == errSecAuthFailed) {
+                throw KeychainError.userInteractionRequired
+            }
+            guard status == errSecSuccess, let data = result as? Data,
+                  let password = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !password.isEmpty
+            else {
+                throw ClaudeFetchError.safeStorageMissing
+            }
+            return password
+        }.value
+    }
+
+    private func loadClaudeSafeStoragePasswordWithSecurityCLI(timeout: TimeInterval) async throws -> String {
+        try await withCheckedThrowingContinuation { cont in
+            let gate = ContinuationGate(cont)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            process.arguments = ["find-generic-password", "-a", "Claude", "-s", "Claude Safe Storage", "-w"]
+            let outPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = Pipe()
+            process.terminationHandler = { proc in
+                let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let password = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                if proc.terminationStatus == 0, !password.isEmpty {
+                    gate.resume(returning: password)
+                } else {
+                    gate.resume(throwing: ClaudeFetchError.safeStorageMissing)
+                }
+            }
+            do {
+                try process.run()
+            } catch {
+                gate.resume(throwing: ClaudeFetchError.safeStorageMissing)
+                return
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                if process.isRunning {
+                    process.terminate()
+                }
+                gate.resume(throwing: KeychainError.timedOut)
+            }
         }
     }
 
-    private func decryptClaudeDesktopSessionKey(password: String) async throws -> String {
-        let script = """
-import hashlib, sqlite3, shutil, os, sys
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+    // Pure Swift cookie decryption: PBKDF2-SHA1 + AES-CBC via CommonCrypto + SQLite3
+    private func extractAllClaudeCookiesSwift(password: String) throws -> [String: ClaudeCookieInfo] {
+        // Derive AES-128 key: PBKDF2-SHA1(password, "saltysalt", 1003 iterations)
+        guard let pwData = password.data(using: .utf8) else { throw ClaudeFetchError.cookieDecryptFailed }
+        let salt = Data("saltysalt".utf8)
+        var derivedKey = Data(repeating: 0, count: 16)
+        let pbkdfStatus = derivedKey.withUnsafeMutableBytes { keyPtr in
+            pwData.withUnsafeBytes { pwPtr in
+                salt.withUnsafeBytes { saltPtr in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        pwPtr.baseAddress, pwData.count,
+                        saltPtr.baseAddress, salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                        1003,
+                        keyPtr.baseAddress, 16
+                    )
+                }
+            }
+        }
+        guard pbkdfStatus == kCCSuccess else { throw ClaudeFetchError.cookieDecryptFailed }
+        let iv = Data(repeating: 0x20, count: 16)  // 16 space chars
 
-pw = sys.argv[1]
-src = sys.argv[2]
-key = hashlib.pbkdf2_hmac('sha1', pw.encode(), b'saltysalt', 1003, dklen=16)
-iv = b' ' * 16
+        // Copy SQLite DB to temp path to avoid locking
+        let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("claude_ck_\(ProcessInfo.processInfo.processIdentifier).db")
+        defer { try? fileManager.removeItem(at: tmpURL) }
+        try fileManager.copyItem(at: claudeCookieDBURL, to: tmpURL)
 
-dst = f'/tmp/claude_ck_{os.getpid()}.db'
-shutil.copy2(src, dst)
-try:
-    conn = sqlite3.connect(dst)
-    row = conn.execute("SELECT hex(encrypted_value) FROM cookies WHERE name='sessionKey' AND host_key LIKE '%claude.ai%'").fetchone()
-    conn.close()
-finally:
-    os.unlink(dst)
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(tmpURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let db else { throw ClaudeFetchError.cookieDecryptFailed }
+        defer { sqlite3_close(db) }
 
-if not row or not row[0]:
-    print("__NO_SESSION_KEY__", end='')
-    sys.exit(0)
-
-enc_bytes = bytes.fromhex(row[0])[3:]
-dec = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend()).decryptor()
-raw = dec.update(enc_bytes) + dec.finalize()
-pad = raw[-1]
-result = raw[:-pad]
-print(result[32:].decode('utf-8'), end='')
-"""
-        let result = try await runProcess(
-            executableURL: URL(fileURLWithPath: pythonPath),
-            arguments: ["-c", script, password, claudeCookieDBURL.path]
-        )
-        if result.exitCode != 0 {
+        var stmt: OpaquePointer?
+        let sql = "SELECT name, encrypted_value, host_key, path, is_secure FROM cookies WHERE host_key LIKE '%claude.ai%'"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
             throw ClaudeFetchError.cookieDecryptFailed
         }
-        let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if output == "__NO_SESSION_KEY__" {
+        defer { sqlite3_finalize(stmt) }
+
+        var cookies: [String: ClaudeCookieInfo] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let nameCStr = sqlite3_column_text(stmt, 0),
+                  let hostCStr = sqlite3_column_text(stmt, 2)
+            else { continue }
+            let name = String(cString: nameCStr)
+            let host = String(cString: hostCStr)
+            let pathStr = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "/"
+            let isSecure = sqlite3_column_int(stmt, 4) != 0
+
+            let encLen = Int(sqlite3_column_bytes(stmt, 1))
+            guard encLen > 3,
+                  let encPtr = sqlite3_column_blob(stmt, 1)
+            else { continue }
+
+            let encData = Data(bytes: encPtr, count: encLen)
+            // Strip "v10" prefix (3 bytes), then AES-CBC decrypt
+            let cipherData = encData.dropFirst(3)
+            guard cipherData.count > 0 else { continue }
+
+            var decryptedData = Data(repeating: 0, count: cipherData.count + kCCBlockSizeAES128)
+            let decryptedCapacity = decryptedData.count
+            var decryptedCount = 0
+            let status = decryptedData.withUnsafeMutableBytes { decPtr in
+                cipherData.withUnsafeBytes { cipPtr in
+                    derivedKey.withUnsafeBytes { keyPtr in
+                        iv.withUnsafeBytes { ivPtr in
+                            CCCrypt(
+                                CCOperation(kCCDecrypt),
+                                CCAlgorithm(kCCAlgorithmAES),
+                                CCOptions(kCCOptionPKCS7Padding),
+                                keyPtr.baseAddress, 16,
+                                ivPtr.baseAddress,
+                                cipPtr.baseAddress, cipherData.count,
+                                decPtr.baseAddress, decryptedCapacity,
+                                &decryptedCount
+                            )
+                        }
+                    }
+                }
+            }
+            guard status == kCCSuccess, decryptedCount > 32 else { continue }
+
+            // Skip 32-byte random prefix, decode UTF-8
+            let valueData = decryptedData.prefix(decryptedCount).dropFirst(32)
+            guard let value = String(data: valueData, encoding: .utf8), !value.isEmpty else { continue }
+
+            cookies[name] = ClaudeCookieInfo(value: value, domain: host, path: pathStr.isEmpty ? "/" : pathStr, isSecure: isSecure)
+        }
+
+        guard cookies["sessionKey"] != nil else {
             throw ClaudeFetchError.notLoggedIn
         }
-        guard !output.isEmpty else {
-            throw ClaudeFetchError.unsupportedCookieSchema
-        }
-        return output
+        return cookies
     }
 
+    @MainActor
     private func finish(_ result: Result<APIBalanceSnapshot, Error>) {
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        resultPollTimer?.invalidate()
+        resultPollTimer = nil
+        didStartDataScript = false
         webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView = nil
@@ -3237,34 +4220,16 @@ print(result[32:].decode('utf-8'), end='')
         continuation = nil
     }
 
-    private func runProcess(executableURL: URL, arguments: [String]) async throws -> (exitCode: Int32, stdout: String, stderr: String) {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
-        return try await withCheckedThrowingContinuation { cont in
-            do {
-                try process.run()
-            } catch {
-                cont.resume(throwing: ClaudeFetchError.pythonUnavailable)
-                return
-            }
-            process.terminationHandler = { proc in
-                let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                cont.resume(returning: (proc.terminationStatus, out, err))
-            }
-        }
-    }
 }
 
 extension ClaudeWebFetcher: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Guard against multiple didFinish (Cloudflare redirect chains etc.)
+        guard !didStartDataScript else { return }
+        didStartDataScript = true
+
         webView.evaluateJavaScript("""
+            window.__claudeResult = null;
             (async () => {
                 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -3326,10 +4291,21 @@ extension ClaudeWebFetcher: WKNavigationDelegate {
                     return extractDesignFromText(blockText);
                 }
 
+                function parseRoutineRunsFromDocument() {
+                    const raw = document.body ? document.body.innerText : '';
+                    if (!raw) return null;
+                    // "Daily included routine runs ... 0 / 5"
+                    const m = raw.match(/routine runs[\\s\\S]{0,160}?(\\d+)\\s*\\/\\s*(\\d+)/i);
+                    if (!m) return null;
+                    return { used: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+                }
+
                 let designFromPage = null;
+                let routineFromPage = null;
                 for (let i = 0; i < 30; i += 1) {
-                    designFromPage = parseClaudeDesignFromDocument();
-                    if (designFromPage) break;
+                    if (!designFromPage) designFromPage = parseClaudeDesignFromDocument();
+                    if (!routineFromPage) routineFromPage = parseRoutineRunsFromDocument();
+                    if (designFromPage || routineFromPage) break;
                     await sleep(500);
                 }
 
@@ -3348,6 +4324,7 @@ extension ClaudeWebFetcher: WKNavigationDelegate {
                         usage: usage,
                         limits: limits,
                         designUsage: designFromPage,
+                        routineUsage: routineFromPage,
                         pageDebug: {
                             title: document.title || null,
                             url: location.href,
@@ -3356,28 +4333,47 @@ extension ClaudeWebFetcher: WKNavigationDelegate {
                         }
                     })
                 };
-                window.webkit.messageHandlers.claudeData.postMessage(JSON.stringify(result));
-            })().catch(e => window.webkit.messageHandlers.claudeData.postMessage('ERROR:' + e.message));
-        """) { _, err in
-            if let err { _ = err }
+                window.__claudeResult = JSON.stringify(result);
+            })().catch(e => { window.__claudeResult = 'ERROR:' + e.message; });
+        """) { _, _ in }
+
+        // Poll window.__claudeResult since message handlers are unreliable on macOS 26
+        startResultPolling()
+    }
+
+    private func startResultPolling() {
+        resultPollTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.webView?.evaluateJavaScript("window.__claudeResult") { value, _ in
+                    guard let envelope = value as? String, !envelope.isEmpty else { return }
+                    self.handleResultEnvelope(envelope)
+                }
+            }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        resultPollTimer = timer
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        finish(.failure(ClaudeFetchError.networkFailure))
+        Task { @MainActor in
+            finish(.failure(ClaudeFetchError.networkFailure))
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        finish(.failure(ClaudeFetchError.networkFailure))
+        Task { @MainActor in
+            finish(.failure(ClaudeFetchError.networkFailure))
+        }
     }
 }
 
-extension ClaudeWebFetcher: WKScriptMessageHandler {
-    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let envelope = message.body as? String else {
-            finish(.failure(ClaudeFetchError.unsupportedCookieSchema))
-            return
-        }
+extension ClaudeWebFetcher {
+    @MainActor
+    func handleResultEnvelope(_ envelope: String) {
+        // Only act once
+        guard continuation != nil else { return }
         persistClaudeDebugEnvelope(envelope)
 
         if envelope.hasPrefix("ERROR:") {

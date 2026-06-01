@@ -79,10 +79,8 @@ public final class FileProfileStore: ProfileStore, @unchecked Sendable {
     }
 
     public func save(_ file: CodexProfileFile) throws {
-        let directory = fileURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try DateCoding.jsonEncoder.encode(file)
-        try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
+        try SafeFileWriter.write(data, to: fileURL, fileManager: fileManager)
     }
 
     public func upsert(_ profile: CodexProfile) throws {

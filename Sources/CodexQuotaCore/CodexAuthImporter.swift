@@ -75,7 +75,7 @@ public final class CodexAuthImporter: @unchecked Sendable {
             throw CodexAuthImportError.unsupportedAuthFile
         }
 
-        let claims = JWTClaims.decode(from: tokens.idToken) ?? JWTClaims.decode(from: tokens.accessToken)
+        let claims = JWTClaims.merged(idToken: tokens.idToken, accessToken: tokens.accessToken)
         let accountID = tokens.accountID ?? claims?.openAIAuth?["chatgpt_account_id"]?.stringValue
         let email = claims?.email ?? "Codex Account"
         let subject = claims?.subject ?? email
@@ -129,7 +129,7 @@ public final class CodexAuthImporter: @unchecked Sendable {
     }
 
     private static func credentialFingerprint(for tokens: CodexTokens, authJSON: String) -> String {
-        let claims = JWTClaims.decode(from: tokens.idToken) ?? JWTClaims.decode(from: tokens.accessToken)
+        let claims = JWTClaims.merged(idToken: tokens.idToken, accessToken: tokens.accessToken)
         let accountID = tokens.accountID ?? claims?.openAIAuth?["chatgpt_account_id"]?.stringValue
         let identityParts = [
             accountID,
@@ -201,6 +201,18 @@ private struct JWTClaims {
             subject: object["sub"] as? String,
             clientID: object["client_id"] as? String,
             openAIAuth: (object["https://api.openai.com/auth"] as? [String: Any])?.mapValues(JSONValue.init(any:))
+        )
+    }
+
+    static func merged(idToken: String?, accessToken: String?) -> JWTClaims? {
+        let idClaims = decode(from: idToken)
+        let accessClaims = decode(from: accessToken)
+        guard idClaims != nil || accessClaims != nil else { return nil }
+        return JWTClaims(
+            email: idClaims?.email ?? accessClaims?.email,
+            subject: idClaims?.subject ?? accessClaims?.subject,
+            clientID: idClaims?.clientID ?? accessClaims?.clientID,
+            openAIAuth: idClaims?.openAIAuth ?? accessClaims?.openAIAuth
         )
     }
 }

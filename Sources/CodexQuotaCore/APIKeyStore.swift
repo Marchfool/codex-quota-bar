@@ -30,13 +30,11 @@ public final class FileAPIKeyConfigStore: APIKeyConfigStore, @unchecked Sendable
     }
 
     public func save(_ file: APIKeyConfigFile) throws {
-        let directory = fileURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         var sanitized = file
         mergeDefaults(into: &sanitized)
         stripSecureValues(from: &sanitized)
         let data = try DateCoding.jsonEncoder.encode(sanitized)
-        try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
+        try SafeFileWriter.write(data, to: fileURL, fileManager: fileManager)
     }
 
     private func mergeDefaults(into file: inout APIKeyConfigFile) {

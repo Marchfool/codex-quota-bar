@@ -41,10 +41,15 @@ public enum ProviderError: Error, LocalizedError, Equatable {
 }
 
 public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendable {
+    private static let supplementalRateLimitsTimeout: TimeInterval = 6
+    private static let supplementalRateLimitsFreshCacheAge: TimeInterval = 5 * 60
+    private static let supplementalRateLimitsStaleCacheAge: TimeInterval = 60 * 60
+
     private let secretStore: SecretStore
     private let session: URLSession
     private let endpoint: URL
     private let tokenEndpoint: URL
+    private let supplementalRateLimitsCache = SupplementalRateLimitsCache()
 
     public init(
         secretStore: SecretStore,
@@ -64,7 +69,7 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
 
     public func fetchQuota(for slot: AccountSlot, allowsUserInteraction: Bool) async throws -> QuotaSnapshot {
         let token: String
-        if let storedToken = try secretStore.get(
+        if let storedToken = try await secret(
             account: SecretAccount.accessToken(slotID: slot.slotID),
             allowsUserInteraction: allowsUserInteraction
         ) {
@@ -85,7 +90,7 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
 
         switch http.statusCode {
         case 200:
-            return try decodeSnapshot(data: data, slot: slot)
+            return try await decodeSnapshotWithSupplementalRateLimits(data: data, slot: slot)
         case 401, 403:
             guard let refreshedToken = try await refreshAccessToken(
                 for: slot,
@@ -100,7 +105,7 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
             guard retryHTTP.statusCode == 200 else {
                 throw retryHTTP.statusCode == 429 ? ProviderError.rateLimited : ProviderError.server(retryHTTP.statusCode)
             }
-            return try decodeSnapshot(data: retryData, slot: slot)
+            return try await decodeSnapshotWithSupplementalRateLimits(data: retryData, slot: slot)
         case 429:
             throw ProviderError.rateLimited
         default:
@@ -119,11 +124,11 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
     }
 
     private func refreshAccessToken(for slot: AccountSlot, allowsUserInteraction: Bool) async throws -> String? {
-        guard let refreshToken = try secretStore.get(
+        guard let refreshToken = try await secret(
             account: SecretAccount.refreshToken(slotID: slot.slotID),
             allowsUserInteraction: allowsUserInteraction
         ),
-              let clientID = try secretStore.get(
+              let clientID = try await secret(
                 account: SecretAccount.clientID(slotID: slot.slotID),
                 allowsUserInteraction: allowsUserInteraction
               )
@@ -157,14 +162,39 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
             throw ProviderError.unsupportedSchema
         }
 
-        try secretStore.set(accessToken, account: SecretAccount.accessToken(slotID: slot.slotID))
+        try await setSecret(accessToken, account: SecretAccount.accessToken(slotID: slot.slotID))
         if let newRefreshToken = object["refresh_token"] as? String {
-            try secretStore.set(newRefreshToken, account: SecretAccount.refreshToken(slotID: slot.slotID))
+            try await setSecret(newRefreshToken, account: SecretAccount.refreshToken(slotID: slot.slotID))
         }
         if let idToken = object["id_token"] as? String {
-            try secretStore.set(idToken, account: SecretAccount.idToken(slotID: slot.slotID))
+            try await setSecret(idToken, account: SecretAccount.idToken(slotID: slot.slotID))
         }
         return accessToken
+    }
+
+    private func secret(account: String, allowsUserInteraction: Bool) async throws -> String? {
+        let secretStore = secretStore
+        return try await Task.detached(priority: .utility) {
+            try secretStore.get(account: account, allowsUserInteraction: allowsUserInteraction)
+        }.value
+    }
+
+    private func setSecret(_ value: String, account: String) async throws {
+        let secretStore = secretStore
+        try await Task.detached(priority: .utility) {
+            try secretStore.set(value, account: account)
+        }.value
+    }
+
+    private func decodeSnapshotWithSupplementalRateLimits(data: Data, slot: AccountSlot) async throws -> QuotaSnapshot {
+        let snapshot = try decodeSnapshot(data: data, slot: slot)
+        guard !snapshot.quotaWindows.contains(where: { $0.title.hasPrefix("Spark") }),
+              let supplementalData = await fetchSupplementalRateLimitsData(),
+              let merged = try? mergeSupplementalRateLimits(data: supplementalData, into: snapshot)
+        else {
+            return snapshot
+        }
+        return merged
     }
 
     public func decodeSnapshot(data: Data, slot: AccountSlot) throws -> QuotaSnapshot {
@@ -179,9 +209,12 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         let root = object["data"] as? [String: Any] ?? object
         let planType = root.string(at: ["planType"]) ?? root.string(at: ["plan", "type"]) ?? root.string(at: ["subscription", "plan_type"])
             ?? root.string(at: ["plan_type"])
-        let credits = root.string(at: ["creditsBalance"]) ?? root.string(at: ["credits", "balance"])
+        let primaryRateLimit = primaryRateLimit(from: root)
+        let credits = root.string(at: ["creditsBalance"])
+            ?? root.string(at: ["credits", "balance"])
+            ?? primaryRateLimit?.string(at: ["credits", "balance"])
 
-        if let rateLimit = root["rate_limit"] as? [String: Any] {
+        if let rateLimit = primaryRateLimit {
             return try decodeRateLimitSnapshot(rateLimit: rateLimit, root: root, slot: slot, planType: planType, credits: credits)
         }
 
@@ -256,8 +289,8 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         planType: String?,
         credits: String?
     ) throws -> QuotaSnapshot {
-        let primary = rateLimit["primary_window"] as? [String: Any]
-        let secondary = rateLimit["secondary_window"] as? [String: Any]
+        let primary = rateLimit.dictionary(at: ["primary_window"]) ?? rateLimit.dictionary(at: ["primary"])
+        let secondary = rateLimit.dictionary(at: ["secondary_window"]) ?? rateLimit.dictionary(at: ["secondary"])
 
         var windows: [QuotaWindow] = []
         if let primary, let window = decodeRateWindow(primary, id: "codex-official-session", kind: .session, title: "5h") {
@@ -266,6 +299,7 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         if let secondary, let window = decodeRateWindow(secondary, id: "codex-official-weekly", kind: .weekly, title: "Weekly") {
             windows.append(window)
         }
+        windows.append(contentsOf: decodeSparkWindows(from: root))
 
         guard !windows.isEmpty else {
             throw ProviderError.unsupportedSchema
@@ -307,6 +341,184 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         )
     }
 
+    public func mergeSupplementalRateLimits(data: Data, into snapshot: QuotaSnapshot) throws -> QuotaSnapshot {
+        let sparkWindows = try decodeSupplementalRateLimitWindows(data: data)
+        guard !sparkWindows.isEmpty else {
+            return snapshot
+        }
+
+        var merged = snapshot
+        merged.quotaWindows.removeAll { $0.title.hasPrefix("Spark") }
+        merged.quotaWindows.append(contentsOf: sparkWindows)
+        return merged
+    }
+
+    public func decodeSupplementalRateLimitWindows(data: Data) throws -> [QuotaWindow] {
+        let payload = Self.accountRateLimitsResponseData(from: data) ?? data
+        guard let object = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            throw ProviderError.unsupportedSchema
+        }
+
+        let root = object.dictionary(at: ["result"])
+            ?? object.dictionary(at: ["data"])
+            ?? object
+        return decodeSparkWindows(from: root)
+    }
+
+    private func primaryRateLimit(from root: [String: Any]) -> [String: Any]? {
+        if let rateLimit = root.dictionary(at: ["rate_limit"]) ?? root.dictionary(at: ["rateLimits"]) {
+            return rateLimit
+        }
+
+        let buckets = rateLimitBuckets(from: root)
+        if let codex = buckets["codex"] {
+            return codex
+        }
+        return buckets.first { key, bucket in
+            let limitID = bucket.string(at: ["limitId"]) ?? bucket.string(at: ["limit_id"]) ?? key
+            return limitID == "codex"
+        }?.value
+    }
+
+    private func rateLimitBuckets(from root: [String: Any]) -> [String: [String: Any]] {
+        let rawBuckets = root.dictionary(at: ["rateLimitsByLimitId"])
+            ?? root.dictionary(at: ["rate_limits_by_limit_id"])
+            ?? [:]
+
+        var buckets: [String: [String: Any]] = [:]
+        for (key, value) in rawBuckets {
+            if let bucket = value as? [String: Any] {
+                buckets[key] = bucket
+            }
+        }
+        return buckets
+    }
+
+    private func decodeSparkWindows(from root: [String: Any]) -> [QuotaWindow] {
+        guard let bucket = rateLimitBuckets(from: root).first(where: { key, bucket in
+            isSparkRateLimitBucket(key: key, bucket: bucket)
+        })?.value else {
+            return []
+        }
+
+        let limitID = bucket.string(at: ["limitId"]) ?? bucket.string(at: ["limit_id"]) ?? "codex-spark"
+        var windows: [QuotaWindow] = []
+        if let primary = bucket.dictionary(at: ["primary_window"]) ?? bucket.dictionary(at: ["primary"]),
+           let window = decodeRateWindow(primary, id: "\(limitID)-session", kind: .unknown, title: "Spark 5小时") {
+            windows.append(window)
+        }
+        if let secondary = bucket.dictionary(at: ["secondary_window"]) ?? bucket.dictionary(at: ["secondary"]),
+           let window = decodeRateWindow(secondary, id: "\(limitID)-weekly", kind: .unknown, title: "Spark 每周") {
+            windows.append(window)
+        }
+        return windows
+    }
+
+    private func isSparkRateLimitBucket(key: String, bucket: [String: Any]) -> Bool {
+        [
+            key,
+            bucket.string(at: ["limitId"]),
+            bucket.string(at: ["limit_id"]),
+            bucket.string(at: ["limitName"]),
+            bucket.string(at: ["limit_name"])
+        ]
+        .compactMap { $0?.lowercased() }
+        .contains { value in
+            value.contains("spark") || value.contains("bengalfox")
+        }
+    }
+
+    private func fetchSupplementalRateLimitsData() async -> Data? {
+        if let cached = await supplementalRateLimitsCache.data(maxAge: Self.supplementalRateLimitsFreshCacheAge) {
+            return cached
+        }
+
+        guard let data = await Self.runSupplementalRateLimitsCommand(timeout: Self.supplementalRateLimitsTimeout) else {
+            return await supplementalRateLimitsCache.data(maxAge: Self.supplementalRateLimitsStaleCacheAge)
+        }
+        await supplementalRateLimitsCache.store(data)
+        return data
+    }
+
+    private static func codexExecutablePath() -> String? {
+        let candidates = [
+            ProcessInfo.processInfo.environment["CODEX_CLI_PATH"],
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex"
+        ].compactMap { $0 }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private static func accountRateLimitsResponseData(from output: Data) -> Data? {
+        guard let text = String(data: output, encoding: .utf8) else {
+            return nil
+        }
+        return text.split(separator: "\n")
+            .last { line in
+                line.contains(#""id":2"#) && line.contains(#""result""#)
+            }
+            .map { Data($0.utf8) }
+    }
+
+    private static func runSupplementalRateLimitsCommand(timeout: TimeInterval) async -> Data? {
+        await Task.detached(priority: .utility) {
+            runSupplementalRateLimitsCommandSync(timeout: timeout)
+        }.value
+    }
+
+    private static func runSupplementalRateLimitsCommandSync(timeout: TimeInterval) -> Data? {
+        guard let codexPath = codexExecutablePath() else {
+            return nil
+        }
+
+        let initializeMessage = #"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex-quota-bar","version":"0.1.0"},"capabilities":{"experimentalApi":true}}}"#
+        let rateLimitMessage = #"{"method":"account/rateLimits/read","id":2}"#
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: codexPath)
+        process.arguments = ["app-server", "--listen", "stdio://"]
+
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let output = LockedBox<Data?>(nil)
+
+        process.terminationHandler = { _ in
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            output.set(data)
+            semaphore.signal()
+        }
+
+        do {
+            try process.run()
+            let input = "\(initializeMessage)\n\(rateLimitMessage)\n"
+            if let inputData = input.data(using: .utf8) {
+                inputPipe.fileHandleForWriting.write(inputData)
+            }
+            try? inputPipe.fileHandleForWriting.close()
+        } catch {
+            return nil
+        }
+
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            if process.isRunning {
+                process.terminate()
+            }
+            return nil
+        }
+
+        let completedOutput = output.get()
+        guard let completedOutput else {
+            return nil
+        }
+        return accountRateLimitsResponseData(from: completedOutput)
+    }
+
     private func decodeRateWindow(
         _ raw: [String: Any],
         id: String,
@@ -318,6 +530,8 @@ public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendabl
         }
         let resetAt: Date?
         if let epoch = raw.int(at: ["reset_at"]) {
+            resetAt = Date(timeIntervalSince1970: TimeInterval(epoch))
+        } else if let epoch = raw.int(at: ["resetsAt"]) ?? raw.int(at: ["resetAt"]) {
             resetAt = Date(timeIntervalSince1970: TimeInterval(epoch))
         } else if let seconds = raw.int(at: ["reset_after_seconds"]) {
             resetAt = Date().addingTimeInterval(TimeInterval(seconds))
@@ -360,8 +574,29 @@ private extension Dictionary where Key == String, Value == Any {
         }
         return current
     }
+
+    func dictionary(at path: [String]) -> [String: Any]? {
+        value(at: path) as? [String: Any]
+    }
 }
 
 private extension Int {
     var clampedPercent: Int { Swift.min(100, Swift.max(0, self)) }
+}
+
+private actor SupplementalRateLimitsCache {
+    private var cachedData: Data?
+    private var cachedAt: Date?
+
+    func data(maxAge: TimeInterval) -> Data? {
+        guard let cachedData, let cachedAt, Date().timeIntervalSince(cachedAt) <= maxAge else {
+            return nil
+        }
+        return cachedData
+    }
+
+    func store(_ data: Data) {
+        cachedData = data
+        cachedAt = Date()
+    }
 }

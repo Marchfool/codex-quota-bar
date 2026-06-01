@@ -21,9 +21,12 @@ let package = Package(
                 .linkedFramework("ServiceManagement")
             ]
         ),
+        .target(
+            name: "CodexQuotaBarSupport"
+        ),
         .executableTarget(
             name: "CodexQuotaBar",
-            dependencies: ["CodexQuotaCore"],
+            dependencies: ["CodexQuotaCore", "CodexQuotaBarSupport"],
             linkerSettings: [
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("AppKit"),
@@ -33,6 +36,10 @@ let package = Package(
         .executableTarget(
             name: "CodexQuotaCoreTestRunner",
             dependencies: ["CodexQuotaCore"]
+        ),
+        .executableTarget(
+            name: "CodexQuotaBarFrameTestRunner",
+            dependencies: ["CodexQuotaBarSupport"]
         )
     ]
 )

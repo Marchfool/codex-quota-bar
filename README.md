@@ -2,13 +2,13 @@
 
 Language: **English** | [简体中文](docs/i18n/README.zh-CN.md) | [日本語](docs/i18n/README.ja.md) | [한국어](docs/i18n/README.ko.md) | [Español](docs/i18n/README.es.md) | [Français](docs/i18n/README.fr.md) | [Deutsch](docs/i18n/README.de.md)
 
-Native macOS menu bar app for showing Codex quota snapshots across one or more account slots.
+Native macOS menu bar app for monitoring Codex, Claude, API balances, memory pressure, and Codex task activity from one compact dashboard.
 
 ## About / 关于
 
-CodexQuotaBar is a small native macOS menu bar app for monitoring Codex quota without opening the Codex or ChatGPT UI. It silently imports your local Codex login, shows both the 5-hour and weekly windows, and keeps the detailed dashboard one click away.
+CodexQuotaBar is a small native macOS menu bar app for monitoring AI usage without opening each provider UI. It imports your local Codex login, syncs Claude Desktop usage, shows API balance cards, tracks memory pressure, and surfaces Codex task activity from session logs.
 
-CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打开 Codex 或 ChatGPT 界面的情况下查看 Codex 额度。它会静默读取本机 Codex 登录状态，同时展示 5 小时额度和周额度，并提供一个精致的下拉仪表盘。
+CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打开各个服务界面的情况下查看 AI 使用状态。它会导入本机 Codex 登录、同步 Claude Desktop 用量、展示 API 余额卡片、跟踪内存压力，并从 Codex 会话日志里显示任务状态。
 
 ## Screenshots / 截图
 
@@ -18,13 +18,15 @@ CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打�
 
 ## Features
 
-- Compact macOS menu bar readout for 5-hour and weekly Codex quota.
-- Glass-style popover dashboard with account, plan, refresh, and reset details.
-- API key manager with one-click copy, balance snapshots, and DeepSeek/MiniMax usage statistics.
-- Desktop WidgetKit widget for small and medium macOS widgets.
-- Silent import from the local Codex login at `~/.codex/auth.json`.
-- AIPlanMonitor-style profile and slot snapshot files for local inspection.
-- DMG packaging script and generated app icons.
+- Compact macOS menu bar readout for Codex and Claude 5-hour quota windows.
+- Shared glass-style popover and floating desktop widget with Codex, Claude, API balance, and memory cards.
+- Official Codex quota sync with OAuth refresh support, including supplemental Spark rate limits.
+- Claude Desktop usage sync via local cookies, Electron-compatible User-Agent, and routine-run parsing.
+- Codex task traffic light from `~/.codex/sessions/*.jsonl`: running, completed, or failed.
+- Native memory pressure indicator using Mach/sysctl, with a smooth 60-second sparkline.
+- API key manager with one-click copy, balance snapshots, and DeepSeek/MiniMax/Comfly usage statistics.
+- Safe local persistence: secrets stay in Keychain, JSON files contain only metadata and snapshots.
+- DMG packaging script, generated app icons, and documentation screenshots.
 
 ## Build
 
@@ -47,9 +49,11 @@ The app bundle is written to:
 - API key config JSON: `~/Library/Application Support/CodexQuotaBar/api_keys.json`
 - Keychain mirror: macOS Keychain service `com.codexquotabar.secrets`
 
-`Import Current Codex Account` reads `~/.codex/auth.json` and stores an AIPlanMonitor-style profile containing only account identity fields, slot id, and a credential fingerprint. Tokens are mirrored into Keychain so the provider can refresh without persisting raw auth JSON in ordinary files.
+`Import Current Codex Account` reads `~/.codex/auth.json` and stores an AIPlanMonitor-style profile containing only account identity fields, slot id, and a credential fingerprint. Tokens are mirrored into Keychain so the provider can refresh without persisting raw auth JSON in ordinary files. The importer merges ID-token and access-token claims so `client_id` is available for automatic OAuth refresh.
 
 The API key config file stores provider templates, non-secret fields, and the last balance snapshot. DeepSeek/MiniMax API keys and the Comfly token are stored in Keychain, not in JSON.
+
+Claude usage is synced from Claude Desktop's local login state. The app decrypts Claude cookies locally, injects the full cookie set into a hidden WKWebView, and uses a Claude Desktop-compatible Electron User-Agent so Cloudflare-bound cookies remain valid.
 
 `codex_profiles.json` is designed to be metadata-only. Keep it private anyway because it still identifies local accounts.
 

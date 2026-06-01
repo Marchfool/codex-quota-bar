@@ -2,13 +2,13 @@
 
 语言： [English](../../README.md) | **简体中文** | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md)
 
-CodexQuotaBar 是一个原生 macOS 状态栏应用，用于展示 Codex 的 5 小时额度和周额度。
+CodexQuotaBar 是一个原生 macOS 状态栏应用，用于集中展示 Codex、Claude、API 余额、内存压力和 Codex 任务状态。
 
 ## 关于 / About
 
-CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打开 Codex 或 ChatGPT 界面的情况下查看 Codex 额度。它会静默读取本机 Codex 登录状态，同时展示 5 小时额度和周额度，并提供一个精致的下拉仪表盘。
+CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打开各个服务界面的情况下查看 AI 使用状态。它会导入本机 Codex 登录、同步 Claude Desktop 用量、展示 API 余额卡片、跟踪内存压力，并从 Codex 会话日志里显示任务状态。
 
-CodexQuotaBar is a small native macOS menu bar app for monitoring Codex quota without opening the Codex or ChatGPT UI. It silently imports your local Codex login, shows both the 5-hour and weekly windows, and keeps the detailed dashboard one click away.
+CodexQuotaBar is a small native macOS menu bar app for monitoring AI usage without opening each provider UI. It imports your local Codex login, syncs Claude Desktop usage, shows API balance cards, tracks memory pressure, and surfaces Codex task activity from session logs.
 
 ## 截图 / Screenshots
 
@@ -18,13 +18,15 @@ CodexQuotaBar is a small native macOS menu bar app for monitoring Codex quota wi
 
 ## 功能
 
-- 在 macOS 状态栏紧凑显示 `5h` 与 `W` 两个额度。
-- 毛玻璃风格下拉面板，展示账号、套餐、刷新时间和重置时间。
-- API Key 管理器，支持一键复制、余额展示，以及 DeepSeek/MiniMax 使用统计。
-- 提供 macOS 桌面组件，小尺寸和中尺寸都能显示 5 小时额度与周额度。
-- 首次启动静默读取本机 Codex 登录文件 `~/.codex/auth.json`。
-- 保存 AIPlanMonitor 风格的本地 profile 和 slot 快照，方便排查。
-- 提供 DMG 打包脚本和自动生成的应用图标。
+- 在 macOS 状态栏紧凑显示 Codex 与 Claude 的 5 小时额度。
+- 下拉面板和悬浮桌面浮窗复用同一套卡片，展示 Codex、Claude、API 余额与内存状态。
+- Codex 官方额度同步支持 OAuth 自动续期，并补充显示 Spark 额度。
+- Claude Desktop 用量同步支持完整 cookie 注入、Electron UA 和 Routine 次数解析。
+- Codex 任务红绿灯来自 `~/.codex/sessions/*.jsonl`，显示执行中、已完成或异常。
+- 原生 Mach/sysctl 内存压力指示器，带 60 秒平滑折线。
+- API Key 管理器，支持一键复制、余额展示，以及 DeepSeek/MiniMax/Comfly 使用统计。
+- 本地安全持久化：密钥留在 Keychain，JSON 文件只保存元数据和快照。
+- 提供 DMG 打包脚本、自动生成的应用图标和文档截图。
 
 ## 构建
 
@@ -94,9 +96,11 @@ WidgetKit 系统组件：
 - API Key 配置：`~/Library/Application Support/CodexQuotaBar/api_keys.json`
 - 钥匙串镜像：macOS Keychain service `com.codexquotabar.secrets`
 
-`导入当前账号` 会读取 `~/.codex/auth.json`，本地 profile 只保存账号身份字段、slot id 和 credential fingerprint。访问令牌会同步到钥匙串，普通 JSON 文件不再保存原始 auth JSON。
+`导入当前账号` 会读取 `~/.codex/auth.json`，本地 profile 只保存账号身份字段、slot id 和 credential fingerprint。访问令牌会同步到钥匙串，普通 JSON 文件不再保存原始 auth JSON。导入逻辑会合并 id token 与 access token 的 claims，确保 `client_id` 能用于后续 OAuth 自动续期。
 
 API Key 配置文件只保存平台模板、非敏感字段和最后一次余额快照。DeepSeek/MiniMax 的 API key、Comfly token 会保存到 Keychain，不会写入普通 JSON。
+
+Claude 用量从 Claude Desktop 的本地登录态同步：应用会本地解密 Claude cookie，把完整 cookie 集注入隐藏 WKWebView，并使用匹配 Claude Desktop 的 Electron User-Agent，让 Cloudflare 绑定的 cookie 继续有效。
 
 `codex_profiles.json` 现在按元数据文件设计；它仍然会暴露本机账号标识，建议只保存在自己的 macOS 用户账号下，不要上传或分享。
 

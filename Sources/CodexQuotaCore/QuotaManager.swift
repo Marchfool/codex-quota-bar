@@ -123,12 +123,13 @@ public final class QuotaManager: ObservableObject {
 
     public func refreshAll(trigger: QuotaRefreshTrigger = .manual) async {
         isRefreshing = true
+        let activeSlotIDs = Set(slots.filter(\.isActive).map(\.slotID))
+        refreshingSlotIDs.formUnion(activeSlotIDs)
         defer { isRefreshing = false }
 
         var updated: [AccountSlot] = []
         var surfacedError: String?
         for var slot in slots where slot.isActive {
-            refreshingSlotIDs.insert(slot.slotID)
             do {
                 let snapshot = try await provider.fetchQuota(
                     for: slot,

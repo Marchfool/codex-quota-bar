@@ -7,6 +7,8 @@ struct TestRunner {
         try decodesExistingQuotaWindowShape()
         try providerDecodesFlexibleSchema()
         try providerDecodesWhamUsageSchema()
+        try providerDecodesSparkRateLimitBucket()
+        try providerMergesSupplementalSparkRateLimitResponse()
         try llmBalanceProviderDecodesSamples()
         formattersClampPercent()
         formattersUseReadableChineseUpdatedText()
@@ -18,11 +20,13 @@ struct TestRunner {
         try persistedSnapshotDoesNotContainSecrets()
         try profileStoreDoesNotPersistAuthJSON()
         try codexCredentialFingerprintIgnoresTokenRotation()
+        try codexImportStoresClientIDFromAccessTokenWhenIDTokenOmitsIt()
         try apiKeyStoreDoesNotPersistSecureValues()
         await launchRefreshSkipsSecureProviderReads()
         await launchRefreshUsesNonInteractiveSecretReads()
         copyAvailabilityUsesSnapshotsOnly()
-        await claudeAutoRefreshRequiresManualRefresh()
+        await claudeAutoRefreshUsesSharedCadence()
+        await claudeRefreshFailureKeepsLastUsageSnapshot()
         claudeErrorSnapshotsAreActionable()
         markedReadyPreservesExistingMetrics()
         print("All CodexQuotaCore tests passed.")
@@ -126,6 +130,82 @@ struct TestRunner {
         expect(snapshot.quotaWindows[0].kind == .session, "expected primary window to map to session")
         expect(snapshot.quotaWindows[1].remainingPercent == 98, "expected secondary weekly remaining")
         expect(snapshot.extras["planType"] == "prolite", "expected snake_case plan type")
+    }
+
+    static func providerDecodesSparkRateLimitBucket() throws {
+        let provider = OfficialCodexProvider(secretStore: MemorySecretStore())
+        let slot = AccountSlot(slotID: "A", accountKey: "key", displayName: "user@example.com", accountID: "acct")
+        let json = """
+        {
+          "email": "user@example.com",
+          "planType": "prolite",
+          "rateLimits": {
+            "limitId": "codex",
+            "primary": {"usedPercent": 23, "windowDurationMins": 300, "resetsAt": 1780214850},
+            "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1780797498}
+          },
+          "rateLimitsByLimitId": {
+            "codex_bengalfox": {
+              "limitId": "codex_bengalfox",
+              "limitName": "GPT-5.3-Codex-Spark",
+              "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1780226011},
+              "secondary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1780812811}
+            },
+            "codex": {
+              "limitId": "codex",
+              "primary": {"usedPercent": 23, "windowDurationMins": 300, "resetsAt": 1780214850},
+              "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1780797498}
+            }
+          }
+        }
+        """
+
+        let snapshot = try provider.decodeSnapshot(data: Data(json.utf8), slot: slot)
+        let sparkWindows = snapshot.quotaWindows.filter { $0.title.hasPrefix("Spark") }
+
+        expect(snapshot.remaining == 77, "main Codex remaining should stay tied to the standard 5-hour bucket")
+        expect(sparkWindows.count == 2, "expected Spark 5-hour and weekly windows")
+        expect(sparkWindows.map(\.remainingPercent) == [100, 100], "expected unused Spark windows to render as full")
+        expect(sparkWindows.map(\.title) == ["Spark 5小时", "Spark 每周"], "expected Chinese Spark labels for the card")
+    }
+
+    static func providerMergesSupplementalSparkRateLimitResponse() throws {
+        let provider = OfficialCodexProvider(secretStore: MemorySecretStore())
+        let slot = AccountSlot(slotID: "A", accountKey: "key", displayName: "user@example.com", accountID: "acct")
+        let whamJSON = """
+        {
+          "email": "user@example.com",
+          "plan_type": "prolite",
+          "rate_limit": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary_window": {"used_percent": 23, "reset_at": 1780214850},
+            "secondary_window": {"used_percent": 4, "reset_at": 1780797498}
+          }
+        }
+        """
+        let appServerJSON = """
+        {
+          "id": 2,
+          "result": {
+            "rateLimitsByLimitId": {
+              "codex_bengalfox": {
+                "limitId": "codex_bengalfox",
+                "limitName": "GPT-5.3-Codex-Spark",
+                "primary": {"usedPercent": 0, "resetsAt": 1780226011},
+                "secondary": {"usedPercent": 0, "resetsAt": 1780812811}
+              }
+            }
+          }
+        }
+        """
+
+        let snapshot = try provider.decodeSnapshot(data: Data(whamJSON.utf8), slot: slot)
+        let merged = try provider.mergeSupplementalRateLimits(data: Data(appServerJSON.utf8), into: snapshot)
+
+        expect(snapshot.quotaWindows.filter { $0.title.hasPrefix("Spark") }.isEmpty, "legacy wham usage should not contain Spark")
+        expect(merged.remaining == 77, "supplemental Spark should not change standard Codex remaining")
+        expect(merged.quotaWindows.map(\.title) == ["5h", "Weekly", "Spark 5小时", "Spark 每周"], "expected supplemental Spark windows appended to card data")
     }
 
     static func formattersClampPercent() {
@@ -443,6 +523,40 @@ struct TestRunner {
         expect(first == second, "token rotation should not force a startup keychain re-import")
     }
 
+    static func codexImportStoresClientIDFromAccessTokenWhenIDTokenOmitsIt() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let authURL = directory.appendingPathComponent("auth.json")
+        let profilesURL = directory.appendingPathComponent("profiles.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let idToken = try makeJWT(
+            email: "user@example.com",
+            subject: "subject-123",
+            clientID: nil,
+            accountID: "acct-123"
+        )
+        let accessToken = try makeJWT(
+            email: nil,
+            subject: "subject-123",
+            clientID: "client-from-access-token",
+            accountID: "acct-123"
+        )
+        try makeCodexAuthJSON(accessToken: accessToken, refreshToken: "refresh-token", idToken: idToken, accountID: "acct-123")
+            .write(to: authURL, atomically: true, encoding: .utf8)
+
+        let secretStore = MemorySecretStore()
+        let importer = CodexAuthImporter(
+            authURL: authURL,
+            secretStore: secretStore,
+            profileStore: FileProfileStore(fileURL: profilesURL)
+        )
+
+        _ = try importer.importCurrentAccount()
+
+        let storedClientID = try secretStore.get(account: SecretAccount.clientID(slotID: "A"))
+        expect(storedClientID == "client-from-access-token", "import should store client_id from access token when id token omits it")
+    }
+
     static func apiKeyStoreDoesNotPersistSecureValues() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("api_keys.json")
@@ -471,8 +585,9 @@ struct TestRunner {
             balanceProvider: balanceProvider
         )
         let claudeFetchCounter = Counter()
-        manager.claudeFetcher = {
+        manager.claudeFetcher = { allowsUserInteraction in
             await claudeFetchCounter.increment()
+            expect(!allowsUserInteraction, "launch refresh should read Claude login state without keychain UI")
             return APIBalanceSnapshot(balance: "Claude", usedPercent: 0)
         }
 
@@ -482,7 +597,8 @@ struct TestRunner {
         let requestedProviders = await balanceProvider.requestedProviderIDs()
         let claudeFetchCount = await claudeFetchCounter.value()
         expect(requestedProviders.isEmpty, "launch refresh should skip secure providers without a ready snapshot")
-        expect(claudeFetchCount == 0, "launch refresh should not immediately read Claude Safe Storage")
+        expect(claudeFetchCount == 1, "launch refresh should include Claude in the shared cadence")
+        expect(manager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.setupState == .ready, "Claude should refresh during the shared cadence")
     }
 
     @MainActor
@@ -539,7 +655,7 @@ struct TestRunner {
     }
 
     @MainActor
-    static func claudeAutoRefreshRequiresManualRefresh() async {
+    static func claudeAutoRefreshUsesSharedCadence() async {
         var providers = APIKeyProviderConfig.defaults
         for index in providers.indices {
             providers[index].isEnabled = providers[index].id == .claude
@@ -556,25 +672,62 @@ struct TestRunner {
             secretStore: MemorySecretStore(),
             balanceProvider: CountingBalanceProvider()
         )
-        let claudeFetchCounter = Counter()
-        manager.claudeFetcher = {
-            await claudeFetchCounter.increment()
+        let claudeFetchRecorder = ClaudeFetchRecorder()
+        manager.claudeFetcher = { allowsUserInteraction in
+            await claudeFetchRecorder.record(allowsUserInteraction)
             return APIBalanceSnapshot(balance: "Claude Pro", usedPercent: 10)
         }
 
         manager.load()
         await manager.refreshAll(trigger: .launch)
 
-        let claudeFetchCount = await claudeFetchCounter.value()
-        expect(claudeFetchCount == 0, "Claude launch refresh should stay manual-only to avoid boot-time keychain prompts")
-
         await manager.refreshAll(trigger: .polling)
-        let backgroundFetchCount = await claudeFetchCounter.value()
-        expect(backgroundFetchCount == 0, "Claude polling refresh should stay manual-only to avoid background keychain prompts")
 
         await manager.refreshProvider(.claude, trigger: .manual)
-        let manualFetchCount = await claudeFetchCounter.value()
-        expect(manualFetchCount == 1, "Claude manual refresh should still work")
+
+        let reads = await claudeFetchRecorder.reads()
+        expect(reads == [false, false, true], "Claude launch and polling should stay non-interactive; manual refresh can ask for keychain access")
+    }
+
+    @MainActor
+    static func claudeRefreshFailureKeepsLastUsageSnapshot() async {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = providers[index].id == .claude
+            if providers[index].id == .claude {
+                providers[index].lastSnapshot = APIBalanceSnapshot(
+                    balance: "Pro",
+                    usedPercent: 7,
+                    extras: [
+                        "fiveHourUsed": "7",
+                        "sevenDayUsed": "1",
+                        "designUsed": "12",
+                        "fiveHourResetsAt": "2026-05-20T20:00:00Z",
+                        "sevenDayResetsAt": "2026-05-27T14:00:00Z",
+                        "designResetsAt": "2026-05-27T14:00:00Z"
+                    ]
+                ).markedReady(actionHint: "已同步")
+            }
+        }
+
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: MemorySecretStore(),
+            balanceProvider: CountingBalanceProvider()
+        )
+        manager.claudeFetcher = { _ in
+            throw ClaudeFetchError.timedOut
+        }
+
+        manager.load()
+        await manager.refreshProvider(.claude, trigger: .manual)
+
+        let snapshot = manager.providers.first(where: { $0.id == .claude })?.lastSnapshot
+        expect(snapshot?.extras["fiveHourUsed"] == "7", "Claude refresh failures should keep the last 5-hour usage")
+        expect(snapshot?.extras["sevenDayUsed"] == "1", "Claude refresh failures should keep the last weekly usage")
+        expect(snapshot?.extras["designUsed"] == "12", "Claude refresh failures should keep the last design usage")
+        expect(snapshot?.setupState == .ready, "stale Claude metrics should remain renderable instead of becoming an empty setup placeholder")
+        expect(snapshot?.status == .error, "stale Claude metrics should still mark the failed refresh")
     }
 
     static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -621,16 +774,21 @@ private func makeCodexAuthJSON(accessToken: String, refreshToken: String, idToke
     return String(data: data, encoding: .utf8) ?? "{}"
 }
 
-private func makeJWT(email: String, subject: String, clientID: String, accountID: String) throws -> String {
+private func makeJWT(email: String?, subject: String, clientID: String?, accountID: String) throws -> String {
     let headerData = try JSONSerialization.data(withJSONObject: ["alg": "none"], options: [.sortedKeys])
-    let payloadData = try JSONSerialization.data(withJSONObject: [
-        "client_id": clientID,
-        "email": email,
+    var payload: [String: Any] = [
         "sub": subject,
         "https://api.openai.com/auth": [
             "chatgpt_account_id": accountID
         ]
-    ], options: [.sortedKeys])
+    ]
+    if let email {
+        payload["email"] = email
+    }
+    if let clientID {
+        payload["client_id"] = clientID
+    }
+    let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     return "\(base64URL(headerData)).\(base64URL(payloadData)).signature"
 }
 
@@ -755,5 +913,17 @@ private actor Counter {
 
     func value() -> Int {
         count
+    }
+}
+
+private actor ClaudeFetchRecorder {
+    private var values: [Bool] = []
+
+    func record(_ allowsUserInteraction: Bool) {
+        values.append(allowsUserInteraction)
+    }
+
+    func reads() -> [Bool] {
+        values
     }
 }

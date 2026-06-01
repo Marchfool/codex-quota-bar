@@ -11,7 +11,7 @@ public final class APIKeyManager: ObservableObject {
     public let secretStore: SecretStore
     public let balanceProvider: APIBalanceProvider
     public var pollInterval: Duration
-    public var claudeFetcher: (@Sendable () async throws -> APIBalanceSnapshot)?
+    public var claudeFetcher: (@Sendable (_ allowsUserInteraction: Bool) async throws -> APIBalanceSnapshot)?
     private var pollingTask: Task<Void, Never>?
 
     public init(
@@ -45,7 +45,7 @@ public final class APIKeyManager: ObservableObject {
         }
 
         if field.isSecure {
-            return (try? secretStore.get(account: APISecretAccount.field(providerID: providerID, key: key))) ?? ""
+            return secureFieldValue(providerID: providerID, key: key, allowsUserInteraction: false)
         }
         return field.value ?? ""
     }
@@ -53,22 +53,26 @@ public final class APIKeyManager: ObservableObject {
     public func primaryCopyValue(providerID: APIKeyProviderID) -> String {
         switch providerID {
         case .deepseek, .minimax:
-            return fieldValue(providerID: providerID, key: "apiKey")
+            return secureFieldValue(providerID: providerID, key: "apiKey", allowsUserInteraction: true)
         case .comfly:
             let provider = providers.first(where: { $0.id == providerID })
             for key in ["token", "apiKey", "apiToken"] {
                 let value: String
                 if provider?.fields.contains(where: { $0.key == key }) == true {
-                    value = fieldValue(providerID: providerID, key: key).trimmingCharacters(in: .whitespacesAndNewlines)
+                    value = secureFieldValue(providerID: providerID, key: key, allowsUserInteraction: true)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
                 } else {
-                    value = ((try? secretStore.get(account: APISecretAccount.field(providerID: providerID, key: key))) ?? "")
+                    value = ((try? secretStore.get(
+                        account: APISecretAccount.field(providerID: providerID, key: key),
+                        allowsUserInteraction: true
+                    )) ?? "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 }
                 if !value.isEmpty { return value }
             }
             return ""
         case .claude:
-            return fieldValue(providerID: providerID, key: "sessionKey")
+            return secureFieldValue(providerID: providerID, key: "sessionKey", allowsUserInteraction: true)
         }
     }
 
@@ -129,6 +133,8 @@ public final class APIKeyManager: ObservableObject {
     public func refreshAll(trigger: APIRefreshTrigger = .manual) async {
         isRefreshing = true
         lastError = nil
+        let refreshableProviderIDs = Set(providers.filter { shouldRefresh($0, trigger: trigger) }.map(\.id))
+        refreshingProviderIDs.formUnion(refreshableProviderIDs)
         defer { isRefreshing = false }
 
         for provider in providers where shouldRefresh(provider, trigger: trigger) {
@@ -144,12 +150,20 @@ public final class APIKeyManager: ObservableObject {
         defer { refreshingProviderIDs.remove(providerID) }
 
         if providerID == .claude, let claudeFetcher = claudeFetcher {
+            let allowsUserInteraction = shouldAllowSecretInteraction(trigger)
             do {
-                let snapshot = try await claudeFetcher()
+                let snapshot = try await claudeFetcher(allowsUserInteraction)
                 providers[index].lastSnapshot = snapshot.markedReady(actionHint: "已从 Claude Desktop 同步登录态")
+            } catch KeychainError.userInteractionRequired {
+                if allowsUserInteraction, providers[index].lastSnapshot == nil {
+                    providers[index].lastSnapshot = keychainApprovalSnapshot(for: providers[index])
+                }
             } catch {
                 if let claudeError = error as? ClaudeFetchError {
-                    providers[index].lastSnapshot = claudeError.snapshot
+                    providers[index].lastSnapshot = claudeFailureSnapshot(
+                        from: providers[index].lastSnapshot,
+                        error: claudeError
+                    )
                 } else {
                     providers[index].lastSnapshot = staleSnapshot(
                         from: providers[index].lastSnapshot,
@@ -163,7 +177,7 @@ public final class APIKeyManager: ObservableObject {
         }
 
         do {
-            let credentials = try credentials(
+            let credentials = try await credentials(
                 for: providers[index],
                 allowsUserInteraction: shouldAllowSecretInteraction(trigger)
             )
@@ -205,17 +219,34 @@ public final class APIKeyManager: ObservableObject {
         pollingTask = nil
     }
 
-    private func credentials(for provider: APIKeyProviderConfig, allowsUserInteraction: Bool) throws -> [String: String] {
-        try Dictionary(uniqueKeysWithValues: provider.fields.map { field in
+    private func secureFieldValue(providerID: APIKeyProviderID, key: String, allowsUserInteraction: Bool) -> String {
+        (try? secretStore.get(
+            account: APISecretAccount.field(providerID: providerID, key: key),
+            allowsUserInteraction: allowsUserInteraction
+        )) ?? ""
+    }
+
+    private func credentials(for provider: APIKeyProviderConfig, allowsUserInteraction: Bool) async throws -> [String: String] {
+        var values: [(String, String)] = []
+        for field in provider.fields {
             if field.isSecure {
-                let value = try secretStore.get(
+                let value = try await secretValue(
                     account: APISecretAccount.field(providerID: provider.id, key: field.key),
                     allowsUserInteraction: allowsUserInteraction
                 ) ?? ""
-                return (field.key, value)
+                values.append((field.key, value))
+            } else {
+                values.append((field.key, field.value ?? ""))
             }
-            return (field.key, field.value ?? "")
-        })
+        }
+        return Dictionary(uniqueKeysWithValues: values)
+    }
+
+    private func secretValue(account: String, allowsUserInteraction: Bool) async throws -> String? {
+        let secretStore = secretStore
+        return try await Task.detached(priority: .utility) {
+            try secretStore.get(account: account, allowsUserInteraction: allowsUserInteraction)
+        }.value
     }
 
     private func shouldRefresh(_ provider: APIKeyProviderConfig, trigger: APIRefreshTrigger) -> Bool {
@@ -249,10 +280,8 @@ public final class APIKeyManager: ObservableObject {
 
     private func shouldAutoRefreshClaude(_ provider: APIKeyProviderConfig, trigger: APIRefreshTrigger) -> Bool {
         switch trigger {
-        case .manual:
+        case .manual, .launch, .polling:
             return true
-        case .launch, .polling:
-            return false
         }
     }
 
@@ -281,6 +310,20 @@ public final class APIKeyManager: ObservableObject {
         )
     }
 
+    private func claudeFailureSnapshot(from existing: APIBalanceSnapshot?, error: ClaudeFetchError) -> APIBalanceSnapshot {
+        let errorSnapshot = error.snapshot
+        guard var existing, existing.hasClaudeUsageMetrics else {
+            return errorSnapshot
+        }
+
+        existing.status = .error
+        existing.note = "\(errorSnapshot.note ?? error.localizedDescription)；显示上次成功同步的数据"
+        existing.extras["setupState"] = ProviderSetupState.ready.rawValue
+        existing.extras["actionHint"] = errorSnapshot.actionHint ?? "稍后重试"
+        existing.extras["errorCode"] = errorSnapshot.errorCode ?? "claude_fetch_failed"
+        return existing
+    }
+
     private func persist() {
         try? store.save(APIKeyConfigFile(providers: providers))
     }
@@ -307,5 +350,11 @@ public final class APIKeyManager: ObservableObject {
             actionHint: "点击“刷新余额”并允许钥匙串访问",
             errorCode: "provider_keychain_approval_required"
         )
+    }
+}
+
+private extension APIBalanceSnapshot {
+    var hasClaudeUsageMetrics: Bool {
+        extras["fiveHourUsed"] != nil || extras["sevenDayUsed"] != nil || extras["designUsed"] != nil
     }
 }

@@ -27,9 +27,7 @@ public final class FileSlotStore: SlotStore, @unchecked Sendable {
     }
 
     public func save(_ file: SlotFile) throws {
-        let directory = fileURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try DateCoding.jsonEncoder.encode(file)
-        try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
+        try SafeFileWriter.write(data, to: fileURL, fileManager: fileManager)
     }
 }
