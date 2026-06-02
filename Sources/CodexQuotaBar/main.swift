@@ -693,6 +693,7 @@ private struct MonitorPanelView: View {
     let openDataFolder: () -> Void
     let quit: () -> Void
     @State private var copiedProviderID: APIKeyProviderID?
+    @State private var copyFeedbackToken = 0
 
     private var panelHeight: CGFloat {
         PanelMetrics.height(
@@ -825,7 +826,21 @@ private struct MonitorPanelView: View {
         guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
-        copiedProviderID = providerID
+        showCopiedFeedback(for: providerID)
+    }
+
+    private func showCopiedFeedback(for providerID: APIKeyProviderID) {
+        copyFeedbackToken &+= 1
+        let token = copyFeedbackToken
+        copiedProviderID = nil
+        DispatchQueue.main.async {
+            copiedProviderID = providerID
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            if copyFeedbackToken == token {
+                copiedProviderID = nil
+            }
+        }
     }
 
     private var actionBarDivider: some View {
@@ -1127,6 +1142,7 @@ private struct APIBalanceSection: View {
     let importAccount: () -> Void
     let showAccounts: () -> Void
     @State private var copiedProviderID: APIKeyProviderID?
+    @State private var copyFeedbackToken = 0
 
     var body: some View {
         let subscriptionIDs: [APIKeyProviderID] = [.claude, .minimax]
@@ -1218,7 +1234,21 @@ private struct APIBalanceSection: View {
         guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
-        copiedProviderID = provider.id
+        showCopiedFeedback(for: provider.id)
+    }
+
+    private func showCopiedFeedback(for providerID: APIKeyProviderID) {
+        copyFeedbackToken &+= 1
+        let token = copyFeedbackToken
+        copiedProviderID = nil
+        DispatchQueue.main.async {
+            copiedProviderID = providerID
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            if copyFeedbackToken == token {
+                copiedProviderID = nil
+            }
+        }
     }
 
     private func canCopyPrimaryKey(for provider: APIKeyProviderConfig) -> Bool {
@@ -2180,6 +2210,7 @@ private struct FloatingDesktopWidgetView: View {
     var onPinChanged: () -> Void = {}
     @AppStorage("desktopWidgetPinned") private var isPinned = false
     @State private var copiedProviderID: APIKeyProviderID?
+    @State private var copyFeedbackToken = 0
 
     var body: some View {
         // 10s tick is enough to refresh absolute reset labels; the countdown ring and the
@@ -2346,7 +2377,21 @@ private struct FloatingDesktopWidgetView: View {
         guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
-        copiedProviderID = providerID
+        showCopiedFeedback(for: providerID)
+    }
+
+    private func showCopiedFeedback(for providerID: APIKeyProviderID) {
+        copyFeedbackToken &+= 1
+        let token = copyFeedbackToken
+        copiedProviderID = nil
+        DispatchQueue.main.async {
+            copiedProviderID = providerID
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            if copyFeedbackToken == token {
+                copiedProviderID = nil
+            }
+        }
     }
 }
 
