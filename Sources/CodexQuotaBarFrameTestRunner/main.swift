@@ -8,6 +8,7 @@ struct CodexQuotaBarFrameTestRunner {
         clampedFrameRespectsMinimumSizeAndVisibleFrame()
         initialFrameUsesDefaultSizeNearTopRightWhenNothingIsStored()
         initialFrameRestoresSavedFrame()
+        claudeCookieDomainFilterOnlyAllowsClaudeHosts()
         print("All CodexQuotaBar frame tests passed.")
     }
 
@@ -44,6 +45,14 @@ struct CodexQuotaBarFrameTestRunner {
         let frame = DesktopWidgetFrameStore.initialFrame(visibleFrame: visibleFrame, defaults: defaults)
 
         expect(frame == saved, "expected saved frame to restore unchanged when visible")
+    }
+
+    private static func claudeCookieDomainFilterOnlyAllowsClaudeHosts() {
+        expect(ClaudeCookieDomainFilter.isAllowedDomain("claude.ai"), "expected apex Claude domain")
+        expect(ClaudeCookieDomainFilter.isAllowedDomain(".claude.ai"), "expected cookie domain form")
+        expect(ClaudeCookieDomainFilter.isAllowedDomain("console.claude.ai"), "expected Claude subdomain")
+        expect(!ClaudeCookieDomainFilter.isAllowedDomain("evilclaude.ai"), "expected suffix lookalike to be rejected")
+        expect(!ClaudeCookieDomainFilter.isAllowedDomain("claude.ai.evil.example"), "expected superdomain lookalike to be rejected")
     }
 
     private static func isolatedDefaults() -> UserDefaults {

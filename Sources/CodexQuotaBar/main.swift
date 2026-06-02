@@ -4070,6 +4070,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
         let httpOnlyNames: Set<String> = ["sessionKey", "cf_clearance", "__cf_bm", "routingHint"]
         var httpCookies: [HTTPCookie] = []
         for (name, info) in claudeCookies {
+            guard ClaudeCookieDomainFilter.isAllowedDomain(info.domain) else { continue }
             var props: [HTTPCookiePropertyKey: Any] = [
                 .name: name, .value: info.value, .domain: info.domain, .path: info.path,
             ]
@@ -4333,6 +4334,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
             else { continue }
             let name = String(cString: nameCStr)
             let host = String(cString: hostCStr)
+            guard ClaudeCookieDomainFilter.isAllowedDomain(host) else { continue }
             let pathStr = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "/"
             let isSecure = sqlite3_column_int(stmt, 4) != 0
 
