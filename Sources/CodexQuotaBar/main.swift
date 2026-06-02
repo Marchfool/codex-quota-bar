@@ -141,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isPerformingInitialLaunchRefresh = false
     private var unifiedPollingTask: Task<Void, Never>?
     private var isRunningUnifiedRefresh = false
+    private let keychainSecurityACLVersion = 3
+    private let keychainSecurityACLVersionKey = "keychainSecurityACLVersion"
     private let refreshCadence = RefreshCadence(
         intervalSeconds: StartupRefreshPolicy.unifiedRefreshIntervalSeconds,
         initialDelaySeconds: StartupRefreshPolicy.initialRefreshDelaySeconds
@@ -181,7 +183,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         startupImportReason = startupImportDecision.reason
         if startupImportDecision.shouldImport {
             didPerformStartupImport = true
-            silentlyImportCurrentCodexAccount()
+            if silentlyImportCurrentCodexAccount() {
+                UserDefaults.standard.set(keychainSecurityACLVersion, forKey: keychainSecurityACLVersionKey)
+            }
         }
         NSLog(
             "CodexQuotaBar startup import performed=%@ reason=%@",
@@ -564,9 +568,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
-    private func silentlyImportCurrentCodexAccount() {
+    @discardableResult
+    private func silentlyImportCurrentCodexAccount() -> Bool {
         manager.importCurrentCodexAccount()
         manager.load()
+        return manager.lastError == nil
     }
 
     private func evaluateStartupImport() -> StartupImportDecision {
@@ -594,6 +600,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
 
             if currentProfiles.contains(where: { $0.credentialFingerprint == currentFingerprint }) {
+                if UserDefaults.standard.integer(forKey: keychainSecurityACLVersionKey) < keychainSecurityACLVersion {
+                    return StartupImportDecision(shouldImport: true, reason: "keychain_security_acl_refresh")
+                }
                 return StartupImportDecision(shouldImport: false, reason: "profile_fingerprint_matches_auth")
             }
 
@@ -3898,6 +3907,10 @@ private final class ContinuationGate<Value: Sendable>: @unchecked Sendable {
     }
 }
 
+private enum ClaudeSafeStorageSecurityError: Error, Sendable {
+    case failedToStart
+}
+
 private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<APIBalanceSnapshot, Error>?
@@ -4032,15 +4045,15 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
     private func loadClaudeSafeStoragePassword(allowsUserInteraction: Bool) async throws -> String {
         if let cb = onSafeStorageAccessAttempt { await MainActor.run { cb() } }
 
-        if !allowsUserInteraction {
-            return try await loadClaudeSafeStoragePasswordInProcess(allowsUserInteraction: false)
-        }
-
         // Read the "Claude Safe Storage" password via the /usr/bin/security CLI rather than an
         // in-process SecItemCopyMatching. The keychain ACL is keyed by the *accessing* binary;
         // /usr/bin/security is already trusted for this item, so this returns without popping a
         // per-app authorization dialog and without blocking the app's main run loop.
-        return try await loadClaudeSafeStoragePasswordWithSecurityCLI(timeout: 8)
+        do {
+            return try await loadClaudeSafeStoragePasswordWithSecurityCLI(timeout: 8)
+        } catch ClaudeSafeStorageSecurityError.failedToStart {
+            return try await loadClaudeSafeStoragePasswordInProcess(allowsUserInteraction: allowsUserInteraction)
+        }
     }
 
     private func loadClaudeSafeStoragePasswordInProcess(allowsUserInteraction: Bool) async throws -> String {
@@ -4098,7 +4111,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
             do {
                 try process.run()
             } catch {
-                gate.resume(throwing: ClaudeFetchError.safeStorageMissing)
+                gate.resume(throwing: ClaudeSafeStorageSecurityError.failedToStart)
                 return
             }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {

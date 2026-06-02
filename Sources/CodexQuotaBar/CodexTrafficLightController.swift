@@ -170,18 +170,22 @@ final class CodexTrafficLightController: ObservableObject {
     // MARK: - Inference (nonisolated: runs on the background scan queue)
 
     private struct Probe { let path: String; let modifiedAt: Date }
+    nonisolated private static let candidateWindowSeconds: TimeInterval = 45 * 60
+    nonisolated private static let quietTurnGraceSeconds: TimeInterval = 3 * 60
+    nonisolated private static let pendingToolGraceSeconds: TimeInterval = 45 * 60
 
     nonisolated private static func inferCurrentMode() -> (mode: Mode, detail: String)? {
         let probes = recentSessionProbes(limit: 12)
         guard !probes.isEmpty else { return (.idle, "无会话") }
 
         let now = Date()
-        let fresh = probes.filter { now.timeIntervalSince($0.modifiedAt) <= 10 * 60 }
+        let fresh = probes.filter { now.timeIntervalSince($0.modifiedAt) <= candidateWindowSeconds }
         let candidates = fresh.isEmpty ? Array(probes.prefix(1)) : fresh
 
         var sawSuccess = false
         for probe in candidates {
-            guard let mode = inferModeFromJSONL(path: probe.path) else { continue }
+            let modifiedAgo = now.timeIntervalSince(probe.modifiedAt)
+            guard let mode = inferModeFromJSONL(path: probe.path, modifiedAgo: modifiedAgo) else { continue }
             if mode == .failure { return (.failure, relativeTime(probe.modifiedAt)) }
             if mode == .running { return (.running, relativeTime(probe.modifiedAt)) }
             if mode == .success { sawSuccess = true }
@@ -207,7 +211,51 @@ final class CodexTrafficLightController: ObservableObject {
         return Array(probes.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(max(limit, 1)))
     }
 
-    nonisolated private static func inferModeFromJSONL(path: String) -> Mode? {
+    private struct TurnProbeState {
+        var hasOpenTurn = false
+        var terminalMode: Mode?
+        var pendingCallIDs = Set<String>()
+        var anonymousPendingCalls = 0
+
+        var hasPendingTool: Bool {
+            !pendingCallIDs.isEmpty || anonymousPendingCalls > 0
+        }
+
+        mutating func startTurn() {
+            hasOpenTurn = true
+            terminalMode = nil
+            pendingCallIDs.removeAll()
+            anonymousPendingCalls = 0
+        }
+
+        mutating func finish(_ mode: Mode) {
+            hasOpenTurn = false
+            terminalMode = mode
+            pendingCallIDs.removeAll()
+            anonymousPendingCalls = 0
+        }
+
+        mutating func startTool(callID: String?) {
+            hasOpenTurn = true
+            terminalMode = nil
+            if let callID, !callID.isEmpty {
+                pendingCallIDs.insert(callID)
+            } else {
+                anonymousPendingCalls += 1
+            }
+        }
+
+        mutating func finishTool(callID: String?) {
+            hasOpenTurn = true
+            if let callID, !callID.isEmpty {
+                pendingCallIDs.remove(callID)
+            } else if anonymousPendingCalls > 0 {
+                anonymousPendingCalls -= 1
+            }
+        }
+    }
+
+    nonisolated private static func inferModeFromJSONL(path: String, modifiedAgo: TimeInterval) -> Mode? {
         guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
         defer { try? handle.close() }
         let fileSize = (try? handle.seekToEnd()) ?? 0
@@ -215,32 +263,63 @@ final class CodexTrafficLightController: ObservableObject {
         try? handle.seek(toOffset: fileSize - readSize)
         guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8), !text.isEmpty else { return nil }
 
-        var seenCurrentTurn = false
-        var latest: Mode?
+        var state = TurnProbeState()
         for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = raw.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   let payload = json["payload"] as? [String: Any] else { continue }
             let type = (payload["type"] as? String)?.lowercased() ?? ""
             let phase = (payload["phase"] as? String)?.lowercased() ?? ""
+            let callID = (payload["call_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            if type == "user_message" { seenCurrentTurn = true; latest = .running; continue }
+            if type == "task_started" || type == "user_message" { state.startTurn(); continue }
             if type == "task_complete" || type == "turn_aborted" || phase == "final" || phase == "final_answer" {
-                latest = .success; continue
-            }
-            guard seenCurrentTurn else {
-                if type == "function_call" || type == "function_call_output" || type == "reasoning" { latest = .running }
-                continue
+                state.finish(.success); continue
             }
             if let failure = failureText(from: payload) {
                 let l = failure.lowercased()
                 if l.contains("error") || l.contains("failed") || l.contains("exception") || l.contains("crash") {
-                    latest = .failure; continue
+                    state.finish(.failure); continue
                 }
             }
-            if type == "function_call" || type == "function_call_output" || type == "reasoning" { latest = .running }
+            if isToolCallStart(type) {
+                state.startTool(callID: callID); continue
+            }
+            if isToolCallEnd(type) {
+                state.finishTool(callID: callID); continue
+            }
+            if type == "reasoning" || phase == "commentary" {
+                state.hasOpenTurn = true
+                if state.terminalMode != nil { state.terminalMode = nil }
+            }
         }
-        return latest
+
+        if let terminalMode = state.terminalMode {
+            return terminalMode
+        }
+        if state.hasPendingTool {
+            return modifiedAgo <= pendingToolGraceSeconds ? .running : .success
+        }
+        if state.hasOpenTurn {
+            return modifiedAgo <= quietTurnGraceSeconds ? .running : .success
+        }
+        return nil
+    }
+
+    nonisolated private static func isToolCallStart(_ type: String) -> Bool {
+        if type == "function_call" || type == "custom_tool_call" { return true }
+        if type.hasSuffix("_call"),
+           !type.hasSuffix("_tool_call_output"),
+           !type.hasSuffix("_output"),
+           !type.hasSuffix("_end") {
+            return true
+        }
+        return false
+    }
+
+    nonisolated private static func isToolCallEnd(_ type: String) -> Bool {
+        if type == "function_call_output" || type == "custom_tool_call_output" { return true }
+        return type.hasSuffix("_output") || type.hasSuffix("_end")
     }
 
     nonisolated private static func failureText(from payload: [String: Any]) -> String? {

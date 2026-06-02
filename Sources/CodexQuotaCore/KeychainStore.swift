@@ -44,17 +44,17 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     public func set(_ value: String, account: String) throws {
         let data = Data(value.utf8)
         let query = baseQuery(account: account)
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecSuccess { return }
-        if status == errSecItemNotFound {
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw KeychainError.unexpectedStatus(addStatus) }
-            return
+        switch runSecurityDelete(account: account, timeout: securityTimeout) {
+        case .success:
+            switch runSecuritySet(value, account: account, timeout: securityTimeout) {
+            case .success:
+                return
+            case .failedToStart, .timedOut, .unexpected:
+                try setInProcess(data, query: query)
+            }
+        case .failedToStart, .timedOut, .unexpected:
+            try setInProcess(data, query: query)
         }
-        throw KeychainError.unexpectedStatus(status)
     }
 
     public func get(account: String) throws -> String? {
@@ -62,15 +62,14 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     }
 
     public func get(account: String, allowsUserInteraction: Bool) throws -> String? {
-        if !allowsUserInteraction {
-            return try inProcessGet(account: account, allowsUserInteraction: false)
-        }
-
         // Read via the /usr/bin/security CLI instead of an in-process SecItemCopyMatching.
         // The keychain ACL is keyed by the *accessing* binary; /usr/bin/security is a stable,
         // already-trusted Apple binary, so once approved it never re-prompts — even across app
         // rebuilds/restarts (unlike the self-signed app binary, whose trust is unstable and
         // triggers scattered authorization dialogs at launch). The returned secret is identical.
+        // Keep both interactive and non-interactive refreshes on this path; the timeout below is
+        // the guard against hangs, while avoiding the app-binary ACL prompt is the guard against
+        // restart-time keychain popups.
         switch runSecurityGet(account: account, timeout: securityTimeout) {
         case .success(let result):
             if result.terminationStatus == 0 {
@@ -79,11 +78,10 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
             }
             // `security` exits non-zero when the item is absent (errSecItemNotFound == 44) — treat as nil.
             if result.terminationStatus == 44 { return nil }
-            // Otherwise fall back to the in-process path so callers still get the proper error/behavior.
-            return try inProcessGet(account: account, allowsUserInteraction: true)
+            throw KeychainError.unexpectedStatus(result.terminationStatus)
         case .failedToStart:
             // Fall back to in-process read if the CLI cannot be spawned.
-            return try inProcessGet(account: account, allowsUserInteraction: true)
+            return try inProcessGet(account: account, allowsUserInteraction: allowsUserInteraction)
         case .timedOut:
             throw KeychainError.timedOut
         }
@@ -124,6 +122,22 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         ]
     }
 
+    private func setInProcess(_ data: Data, query: [String: Any]) throws {
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus == errSecSuccess { return }
+        if addStatus == errSecDuplicateItem {
+            let updateStatus = SecItemUpdate(
+                query as CFDictionary,
+                [kSecValueData as String: data] as CFDictionary
+            )
+            guard updateStatus == errSecSuccess else { throw KeychainError.unexpectedStatus(updateStatus) }
+            return
+        }
+        throw KeychainError.unexpectedStatus(addStatus)
+    }
+
     private struct SecurityGetResult {
         var terminationStatus: Int32
         var stdout: Data
@@ -133,6 +147,98 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         case success(SecurityGetResult)
         case failedToStart
         case timedOut
+    }
+
+    private enum SecuritySetOutcome {
+        case success
+        case failedToStart
+        case timedOut
+        case unexpected(OSStatus)
+    }
+
+    private enum SecurityDeleteOutcome {
+        case success
+        case failedToStart
+        case timedOut
+        case unexpected(OSStatus)
+    }
+
+    private func runSecuritySet(_ value: String, account: String, timeout: TimeInterval) -> SecuritySetOutcome {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        // The interactive -w prompt truncates long OAuth tokens; pass the value directly so
+        // security creates an item that it can later read without per-app ACL prompts.
+        process.arguments = [
+            "add-generic-password",
+            "-s", service,
+            "-a", account,
+            "-w", value,
+            "-T", "/usr/bin/security"
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let terminationStatus = LockedBox<Int32?>(nil)
+        process.terminationHandler = { proc in
+            terminationStatus.set(proc.terminationStatus)
+            semaphore.signal()
+        }
+
+        do {
+            try process.run()
+        } catch {
+            return .failedToStart
+        }
+
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            if process.isRunning {
+                process.terminate()
+            }
+            return .timedOut
+        }
+
+        guard let status = terminationStatus.get() else {
+            return .failedToStart
+        }
+        return status == 0 ? .success : .unexpected(status)
+    }
+
+    private func runSecurityDelete(account: String, timeout: TimeInterval) -> SecurityDeleteOutcome {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "delete-generic-password",
+            "-s", service,
+            "-a", account
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let terminationStatus = LockedBox<Int32?>(nil)
+        process.terminationHandler = { proc in
+            terminationStatus.set(proc.terminationStatus)
+            semaphore.signal()
+        }
+
+        do {
+            try process.run()
+        } catch {
+            return .failedToStart
+        }
+
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            if process.isRunning {
+                process.terminate()
+            }
+            return .timedOut
+        }
+
+        guard let status = terminationStatus.get() else {
+            return .failedToStart
+        }
+        return status == 0 || status == 44 ? .success : .unexpected(status)
     }
 
     private func runSecurityGet(account: String, timeout: TimeInterval) -> SecurityGetOutcome {
