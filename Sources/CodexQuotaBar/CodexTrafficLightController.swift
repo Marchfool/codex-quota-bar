@@ -37,10 +37,16 @@ final class CodexTrafficLightController: ObservableObject {
     private var timer: Timer?
     private var eventStream: FSEventStreamRef?
     private let scanQueue = DispatchQueue(label: "com.codexquotabar.trafficlight", qos: .utility)
+    private var scanScheduled = false
+    private var scanInProgress = false
+    private var pendingScan = false
+    private var lastScanStartedAt = Date.distantPast
     private var renderedMode: Mode = .idle
     private var blinkWorkItems: [DispatchWorkItem] = []
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Codex: 空闲", action: nil, keyEquivalent: "")
+    private let minimumScanInterval: TimeInterval = 1.25
+    private let fallbackScanInterval: TimeInterval = 10
 
     func start() {
         guard statusItem == nil else { return }
@@ -52,7 +58,7 @@ final class CodexTrafficLightController: ObservableObject {
         renderInitialIcon()
 
         startFSEvents()
-        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: fallbackScanInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.scanNow()
             }
@@ -73,9 +79,44 @@ final class CodexTrafficLightController: ObservableObject {
 
     /// Trigger a background scan and apply the result on the main actor.
     func scanNow() {
+        scheduleScan()
+    }
+
+    private func scheduleScan(after requestedDelay: TimeInterval = 0) {
+        if scanInProgress {
+            pendingScan = true
+            return
+        }
+        guard !scanScheduled else { return }
+
+        let elapsed = Date().timeIntervalSince(lastScanStartedAt)
+        let throttleDelay = max(0, minimumScanInterval - elapsed)
+        let delay = max(requestedDelay, throttleDelay)
+        scanScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.performScan()
+            }
+        }
+    }
+
+    private func performScan() {
+        guard scanScheduled else { return }
+        scanScheduled = false
+        scanInProgress = true
+        lastScanStartedAt = Date()
         scanQueue.async {
             let result = CodexTrafficLightController.inferCurrentMode()
-            Task { @MainActor [weak self] in self?.apply(result) }
+            Task { @MainActor [weak self] in self?.finishScan(result) }
+        }
+    }
+
+    private func finishScan(_ result: (mode: Mode, detail: String)?) {
+        apply(result)
+        scanInProgress = false
+        if pendingScan {
+            pendingScan = false
+            scheduleScan()
         }
     }
 
@@ -159,8 +200,8 @@ final class CodexTrafficLightController: ObservableObject {
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault, Self.eventCallback, &ctx,
             [path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.2,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            1.0,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents)
         ) else { return }
         FSEventStreamSetDispatchQueue(stream, scanQueue)
         FSEventStreamStart(stream)
@@ -173,9 +214,11 @@ final class CodexTrafficLightController: ObservableObject {
     nonisolated private static let candidateWindowSeconds: TimeInterval = 45 * 60
     nonisolated private static let quietTurnGraceSeconds: TimeInterval = 3 * 60
     nonisolated private static let pendingToolGraceSeconds: TimeInterval = 45 * 60
+    nonisolated private static let recentProbeLimit = 4
+    nonisolated private static let maxTailReadBytes: UInt64 = 512 * 1024
 
     nonisolated private static func inferCurrentMode() -> (mode: Mode, detail: String)? {
-        let probes = recentSessionProbes(limit: 12)
+        let probes = recentSessionProbes(limit: recentProbeLimit)
         guard !probes.isEmpty else { return (.idle, "无会话") }
 
         let now = Date()
@@ -259,7 +302,7 @@ final class CodexTrafficLightController: ObservableObject {
         guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
         defer { try? handle.close() }
         let fileSize = (try? handle.seekToEnd()) ?? 0
-        let readSize = min(UInt64(2 * 1024 * 1024), fileSize)
+        let readSize = min(maxTailReadBytes, fileSize)
         try? handle.seek(toOffset: fileSize - readSize)
         guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8), !text.isEmpty else { return nil }
 

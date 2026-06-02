@@ -36,7 +36,7 @@ public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     private let service: String
     private let securityTimeout: TimeInterval
 
-    public init(service: String = "com.codexquotabar.secrets", securityTimeout: TimeInterval = 6) {
+    public init(service: String = "com.codexquotabar.secrets", securityTimeout: TimeInterval = 15) {
         self.service = service
         self.securityTimeout = securityTimeout
     }

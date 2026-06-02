@@ -131,7 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var apiKeysWindow: NSWindow?
     private var desktopWidgetWindow: NSPanel?
     private let popover = NSPopover()
-    private let claudeWebFetcher = ClaudeWebFetcher()
+    private var popoverContentViewController: NSViewController?
+    private var claudeWebFetcher: ClaudeWebFetcher?
     private let memoryMonitor = MemoryMonitorController()
     private let trafficLight = CodexTrafficLightController()
     private let claudeActivity = ClaudeActivityController()
@@ -143,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isRunningUnifiedRefresh = false
     private let keychainSecurityACLVersion = 3
     private let keychainSecurityACLVersionKey = "keychainSecurityACLVersion"
+    private let desktopWidgetRestoreOnLaunchKey = "desktopWidgetRestoreOnLaunch"
     private let refreshCadence = RefreshCadence(
         intervalSeconds: StartupRefreshPolicy.unifiedRefreshIntervalSeconds,
         initialDelaySeconds: StartupRefreshPolicy.initialRefreshDelaySeconds
@@ -168,13 +170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             importer: CodexAuthImporter(secretStore: secretStore, profileStore: profileStore)
         )
         apiKeyManager = APIKeyManager(store: FileAPIKeyConfigStore(), secretStore: secretStore)
-        claudeWebFetcher.onSafeStorageAccessAttempt = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.handleClaudeSafeStorageAccessAttempt()
-            }
-        }
-        apiKeyManager.claudeFetcher = { [claudeWebFetcher] allowsUserInteraction in
-            try await claudeWebFetcher.fetchOrganizations(allowsUserInteraction: allowsUserInteraction)
+        apiKeyManager.claudeFetcher = { [weak self] allowsUserInteraction in
+            guard let self else { throw ClaudeFetchError.webFetchFailed("应用已退出") }
+            return try await self.fetchClaudeOrganizations(allowsUserInteraction: allowsUserInteraction)
         }
         manager.load()
         apiKeyManager.load()
@@ -209,27 +207,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         popover.behavior = .transient
         popover.animates = true
         updatePopoverSize()
-        let hostingController = NSHostingController(
-            rootView: MonitorPanelView(
-                manager: manager,
-                apiKeyManager: apiKeyManager,
-                refreshCadence: refreshCadence,
-                memoryMonitor: memoryMonitor,
-                trafficLight: trafficLight,
-                claudeActivity: claudeActivity,
-                refresh: { [weak self] in self?.refreshNow() },
-                importAccount: { [weak self] in self?.importAccount() },
-                showAccounts: { [weak self] in self?.showAccounts() },
-                showAPIKeys: { [weak self] in self?.showAPIKeys() },
-                refreshAPIKeys: { [weak self] in self?.refreshAPIKeys() },
-                toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
-                openDataFolder: { [weak self] in self?.openLogs() },
-                quit: { [weak self] in self?.quit() }
-            )
-        )
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
-        popover.contentViewController = hostingController
 
         Task {
             isPerformingInitialLaunchRefresh = true
@@ -245,9 +222,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             configureStatusButton()
             startUnifiedPolling()
         }
-        showDesktopWidget()
+        if UserDefaults.standard.bool(forKey: desktopWidgetRestoreOnLaunchKey) {
+            showDesktopWidget()
+        }
 
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        // Status-bar text shows reset countdowns in minutes; 15s refresh is plenty and avoids
+        // rebuilding the attributed title every few seconds.
+        Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.configureStatusButton()
                 self?.updatePopoverSize()
@@ -357,12 +338,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            installPopoverContentIfNeeded()
             updatePopoverSize()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.isOpaque = false
             popover.contentViewController?.view.window?.backgroundColor = .clear
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    private func installPopoverContentIfNeeded() {
+        guard popover.contentViewController == nil else { return }
+        let hostingController = NSHostingController(
+            rootView: MonitorPanelView(
+                manager: manager,
+                apiKeyManager: apiKeyManager,
+                refreshCadence: refreshCadence,
+                memoryMonitor: memoryMonitor,
+                trafficLight: trafficLight,
+                claudeActivity: claudeActivity,
+                refresh: { [weak self] in self?.refreshNow() },
+                importAccount: { [weak self] in self?.importAccount() },
+                showAccounts: { [weak self] in self?.showAccounts() },
+                showAPIKeys: { [weak self] in self?.showAPIKeys() },
+                refreshAPIKeys: { [weak self] in self?.refreshAPIKeys() },
+                toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
+                openDataFolder: { [weak self] in self?.openLogs() },
+                quit: { [weak self] in self?.quit() }
+            )
+        )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        popover.contentViewController = hostingController
+        popoverContentViewController = hostingController
     }
 
     @objc private func refreshNow() {
@@ -442,6 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             saveDesktopWidgetFrame(window)
             window.orderOut(nil)
             UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+            UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
             return
         }
 
@@ -504,6 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
+        UserDefaults.standard.set(true, forKey: desktopWidgetRestoreOnLaunchKey)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -626,6 +636,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    private func fetchClaudeOrganizations(allowsUserInteraction: Bool) async throws -> APIBalanceSnapshot {
+        if claudeWebFetcher == nil {
+            let fetcher = ClaudeWebFetcher()
+            fetcher.onSafeStorageAccessAttempt = { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.handleClaudeSafeStorageAccessAttempt()
+                }
+            }
+            claudeWebFetcher = fetcher
+        }
+        guard let claudeWebFetcher else {
+            throw ClaudeFetchError.webFetchFailed("Claude 同步器未初始化")
+        }
+        return try await claudeWebFetcher.fetchOrganizations(allowsUserInteraction: allowsUserInteraction)
+    }
+
     private func startUnifiedPolling() {
         guard unifiedPollingTask == nil else { return }
         unifiedPollingTask = Task { @MainActor [weak self] in
@@ -706,7 +732,7 @@ private struct MonitorPanelView: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { _ in
             ZStack {
-                VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+                Color(red: 0.03, green: 0.03, blue: 0.05)  // opaque base — was a behind-window blur that the ~0.97 gradient covered anyway (live backdrop blur = constant GPU cost)
                 ZStack {
                     LinearGradient(
                         colors: [
@@ -1923,62 +1949,44 @@ private struct MemoryCardView: View {
 
 private struct MemorySparkline: View {
     let points: [MemoryPoint]
-    private let windowSeconds: TimeInterval = 60
-    private let frameInterval: TimeInterval = 0.25
 
+    // No animation timer: the line re-renders only when `points` changes (~every sample),
+    // points evenly spaced by index. Cheap; the line just steps forward each update.
     var body: some View {
-        TimelineView(.periodic(from: .now, by: frameInterval)) { timeline in
-            GeometryReader { proxy in
-                let w = proxy.size.width
-                let h = proxy.size.height
-                let renderPoints = renderedPoints(now: timeline.date)
-                let windowStart = timeline.date.addingTimeInterval(-windowSeconds)
-                let maxV = max(renderPoints.map(\.ratio).max() ?? 0.05, 0.05)
-                let pts = renderPoints.map { point -> CGPoint in
-                    let progress = min(1, max(0, point.capturedAt.timeIntervalSince(windowStart) / windowSeconds))
-                    return CGPoint(
-                        x: w * CGFloat(progress),
-                        y: h - h * CGFloat(min(1, point.ratio / maxV)) * 0.9 - 2
-                    )
-                }
-                ZStack {
-                    if pts.count > 1 {
-                        // Group consecutive same-level points into runs, each keeping its
-                        // historical color while the time window glides between samples.
-                        ForEach(Array(colorRuns(for: renderPoints).enumerated()), id: \.offset) { _, run in
-                            let c = Color(nsColor: memoryPressureColor(run.level))
-                            if run.end > run.start {
-                                Path { p in
-                                    p.move(to: CGPoint(x: pts[run.start].x, y: h))
-                                    for i in run.start...run.end { p.addLine(to: pts[i]) }
-                                    p.addLine(to: CGPoint(x: pts[run.end].x, y: h))
-                                    p.closeSubpath()
-                                }
-                                .fill(c.opacity(0.26))
-                                Path { p in
-                                    p.move(to: pts[run.start])
-                                    for i in (run.start + 1)...run.end { p.addLine(to: pts[i]) }
-                                }
-                                .stroke(c.opacity(0.9), style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
+        GeometryReader { proxy in
+            let w = proxy.size.width
+            let h = proxy.size.height
+            let n = points.count
+            let maxV = max(points.map(\.ratio).max() ?? 0.05, 0.05)
+            let pts = points.enumerated().map { i, point -> CGPoint in
+                CGPoint(
+                    x: n <= 1 ? 0 : w * CGFloat(i) / CGFloat(n - 1),
+                    y: h - h * CGFloat(min(1, point.ratio / maxV)) * 0.9 - 2
+                )
+            }
+            ZStack {
+                if pts.count > 1 {
+                    // Group consecutive same-level points into runs, each keeping its historical color.
+                    ForEach(Array(colorRuns(for: points).enumerated()), id: \.offset) { _, run in
+                        let c = Color(nsColor: memoryPressureColor(run.level))
+                        if run.end > run.start {
+                            Path { p in
+                                p.move(to: CGPoint(x: pts[run.start].x, y: h))
+                                for i in run.start...run.end { p.addLine(to: pts[i]) }
+                                p.addLine(to: CGPoint(x: pts[run.end].x, y: h))
+                                p.closeSubpath()
                             }
+                            .fill(c.opacity(0.26))
+                            Path { p in
+                                p.move(to: pts[run.start])
+                                for i in (run.start + 1)...run.end { p.addLine(to: pts[i]) }
+                            }
+                            .stroke(c.opacity(0.9), style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
                         }
                     }
                 }
             }
         }
-    }
-
-    private func renderedPoints(now: Date) -> [MemoryPoint] {
-        guard let latest = points.last else { return [] }
-        let windowStart = now.addingTimeInterval(-windowSeconds)
-        var visible = points.filter { $0.capturedAt >= windowStart && $0.capturedAt <= now }
-        if let previous = points.last(where: { $0.capturedAt < windowStart }) {
-            visible.insert(previous, at: 0)
-        }
-        if latest.capturedAt < now {
-            visible.append(MemoryPoint(ratio: latest.ratio, level: latest.level, capturedAt: now))
-        }
-        return visible
     }
 
     /// Consecutive points sharing a pressure level become one run. Runs overlap by one point
@@ -2218,7 +2226,7 @@ private struct FloatingDesktopWidgetView: View {
         // per-second full redraw of the whole card stack is wasteful.
         TimelineView(.periodic(from: .now, by: 10)) { _ in
             ZStack {
-                VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+                Color(red: 0.03, green: 0.03, blue: 0.05)  // opaque base — was a behind-window blur that the ~0.97 gradient covered anyway (live backdrop blur = constant GPU cost)
                 LinearGradient(
                     colors: [
                         Color(red: 0.05, green: 0.05, blue: 0.08).opacity(0.96),
@@ -2396,30 +2404,17 @@ private struct FloatingDesktopWidgetView: View {
 }
 
 /// Breathing opacity computed from a low-rate TimelineView (no repeatForever → no 60fps
-/// full-tree re-render). Only this tiny shape re-renders ~8×/sec while running.
-private func breathingOpacity(_ date: Date, low: Double, high: Double, period: Double = 1.9) -> Double {
-    let t = date.timeIntervalSinceReferenceDate
-    let phase = 0.5 + 0.5 * sin(t * 2 * Double.pi / period)
-    return low + (high - low) * phase
-}
-
+/// Static status border — running just shows a brighter/thicker solid stroke (no animation,
+/// no per-frame redraw). Cheap.
 private struct BreathingBorder: View {
     let color: Color
     let running: Bool
     var cornerRadius: CGFloat = 12
 
     var body: some View {
-        if running {
-            TimelineView(.periodic(from: .now, by: 0.12)) { ctx in
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .stroke(color, lineWidth: 1.4)
-                    .opacity(breathingOpacity(ctx.date, low: 0.30, high: 0.95))
-            }
-        } else {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .stroke(color, lineWidth: 1.0)
-                .opacity(0.5)
-        }
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .stroke(color, lineWidth: running ? 1.5 : 1.0)
+            .opacity(running ? 0.9 : 0.5)
     }
 }
 
@@ -2428,14 +2423,7 @@ private struct BreathingDot: View {
     let running: Bool
 
     var body: some View {
-        if running {
-            TimelineView(.periodic(from: .now, by: 0.12)) { ctx in
-                Circle().fill(color).frame(width: 7, height: 7)
-                    .opacity(breathingOpacity(ctx.date, low: 0.4, high: 1.0))
-            }
-        } else {
-            Circle().fill(color).frame(width: 7, height: 7)
-        }
+        Circle().fill(color).frame(width: 7, height: 7)
     }
 }
 
@@ -2584,46 +2572,34 @@ private struct FloatingRefreshProgress: View {
     @ObservedObject var cadence: RefreshCadence
     let isRefreshing: Bool
     let action: () -> Void
-    @State private var isHovering = false
     private let color = Color(red: 0.19, green: 0.78, blue: 0.86)
 
+    // No per-second ticker: re-renders only when the parent refreshes (~10s) or `cadence`
+    // publishes. The countdown text is coarse (≈10s granularity) — fine for a 120s interval —
+    // and the ring is drawn statically (no animation).
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let state = progressState(now: timeline.date)
-            HStack(spacing: 5) {
-                Text(state.label)
-                    .font(.custom("Avenir Next Demi Bold", size: 7.5))
-                    .foregroundStyle(.white.opacity(isRefreshing || cadence.isRefreshing ? 0.52 : 0.34))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .frame(width: 34, alignment: .trailing)
+        let state = progressState(now: Date())
+        return HStack(spacing: 5) {
+            Text(state.label)
+                .font(.custom("Avenir Next Demi Bold", size: 7.5))
+                .foregroundStyle(.white.opacity(isRefreshing || cadence.isRefreshing ? 0.52 : 0.34))
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: 34, alignment: .trailing)
 
-                Button(action: action) {
-                    ZStack {
-                        Circle()
-                            .fill(.white.opacity(isHovering ? 0.07 : 0.02))
-                        Circle()
-                            .stroke(.white.opacity(isHovering ? 0.16 : 0.09), lineWidth: 1.5)
-                        Circle()
-                            .trim(from: 0, to: state.progress)
-                            .stroke(
-                                color.opacity(isHovering ? 1 : 0.92),
-                                style: StrokeStyle(lineWidth: isHovering ? 2 : 1.7, lineCap: .round)
-                            )
-                            .rotationEffect(.degrees(-90))
-                            .animation(.linear(duration: 0.2), value: state.progress)
-                    }
-                    .frame(width: 15, height: 15)
-                    .scaleEffect(isHovering ? 1.13 : 1)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isHovering)
+            Button(action: action) {
+                ZStack {
+                    Circle().stroke(.white.opacity(0.09), lineWidth: 1.5)
+                    Circle()
+                        .trim(from: 0, to: state.progress)
+                        .stroke(color.opacity(0.92), style: StrokeStyle(lineWidth: 1.7, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
                 }
-                .buttonStyle(.borderless)
-                .disabled(isRefreshing)
-                .onHover { hovering in
-                    isHovering = hovering
-                }
-                .help("刷新")
+                .frame(width: 15, height: 15)
             }
+            .buttonStyle(.borderless)
+            .disabled(isRefreshing)
+            .help("刷新")
         }
         .frame(width: 55, height: 18)
         .help("下次自动刷新")
@@ -3216,25 +3192,6 @@ private struct MessageStrip: View {
     }
 }
 
-private struct VisualEffectBackground: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blendingMode: NSVisualEffectView.BlendingMode
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-    }
-}
-
 private struct IconButton: View {
     let title: String
     let systemImage: String
@@ -3332,7 +3289,7 @@ private struct APIKeySettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
     }
 
@@ -3357,7 +3314,7 @@ private struct APIKeySettingsView: View {
             .disabled(manager.isRefreshing)
         }
         .padding(16)
-        .background(.thinMaterial)
+        .background(Color(nsColor: .underPageBackgroundColor))
     }
 
     private func bindingValues(for provider: APIKeyProviderConfig) -> Binding<[String: String]> {
@@ -3456,7 +3413,7 @@ private struct CodexAccountEditor: View {
             }
         }
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
     }
 
@@ -3619,7 +3576,7 @@ private struct APIKeyProviderEditor: View {
             }
         }
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
     }
 
@@ -3911,10 +3868,9 @@ private extension Color {
     }
 }
 
-// MARK: - Claude WKWebView Fetcher
+// MARK: - Claude Usage Fetcher
 
-@MainActor
-private struct ClaudeCookieInfo {
+private struct ClaudeCookieInfo: Sendable {
     var value: String
     var domain: String
     var path: String
@@ -3969,22 +3925,112 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
     var onSafeStorageAccessAttempt: (@MainActor () -> Void)?
 
     func fetchOrganizations(allowsUserInteraction: Bool) async throws -> APIBalanceSnapshot {
-        // Decrypt all Claude Desktop cookies (Swift-native AES), then load the usage page
         let claudeCookies = try await prepareAllClaudeCookies(allowsUserInteraction: allowsUserInteraction)
 
+        if allowsUserInteraction {
+            return try await fetchOrganizationsWithWebView(claudeCookies: claudeCookies)
+        }
+
+        do {
+            return try await fetchOrganizationsWithHTTP(claudeCookies: claudeCookies)
+        } catch {
+            throw error
+        }
+    }
+
+    private func fetchOrganizationsWithHTTP(claudeCookies: [String: ClaudeCookieInfo]) async throws -> APIBalanceSnapshot {
+        let httpCookies = Self.httpCookies(from: claudeCookies)
+        guard let cookieHeader = HTTPCookie.requestHeaderFields(with: httpCookies)["Cookie"], !cookieHeader.isEmpty else {
+            throw ClaudeFetchError.notLoggedIn
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let userAgent = await Self.claudeDesktopUserAgent()
+        let orgsJSON = try await fetchClaudeAPIJSON(
+            path: "/api/organizations",
+            session: session,
+            userAgent: userAgent,
+            cookieHeader: cookieHeader
+        )
+        let orgs = (orgsJSON as? [[String: Any]])
+            ?? ((orgsJSON as? [String: Any])?["organizations"] as? [[String: Any]])
+        guard let orgs else {
+            throw ClaudeFetchError.unsupportedCookieSchema
+        }
+
+        var envelope: [String: Any] = ["organizations": orgs]
+        if let orgID = orgs.first?["uuid"] as? String, !orgID.isEmpty {
+            envelope["usage"] = try? await fetchClaudeAPIJSON(
+                path: "/api/organizations/\(orgID)/usage",
+                session: session,
+                userAgent: userAgent,
+                cookieHeader: cookieHeader
+            )
+            envelope["limits"] = try? await fetchClaudeAPIJSON(
+                path: "/api/organizations/\(orgID)/rate_limit_status",
+                session: session,
+                userAgent: userAgent,
+                cookieHeader: cookieHeader
+            )
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: envelope)
+        return try balanceProvider.decodeBalance(data: data, providerID: .claude)
+    }
+
+    private func fetchClaudeAPIJSON(
+        path: String,
+        session: URLSession,
+        userAgent: String,
+        cookieHeader: String
+    ) async throws -> Any {
+        guard let url = URL(string: "https://claude.ai\(path)") else {
+            throw ClaudeFetchError.webFetchFailed("Claude API URL 无效")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("https://claude.ai", forHTTPHeaderField: "Origin")
+        request.setValue("https://claude.ai/settings/usage", forHTTPHeaderField: "Referer")
+        request.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
+        request.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
+        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ClaudeFetchError.networkFailure
+        }
+        if httpResponse.statusCode == 401 {
+            throw ClaudeFetchError.notLoggedIn
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw ClaudeFetchError.webFetchFailed("Claude API 返回 HTTP \(httpResponse.statusCode)")
+        }
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private func fetchOrganizationsWithWebView(claudeCookies: [String: ClaudeCookieInfo]) async throws -> APIBalanceSnapshot {
+        let userAgent = await Self.claudeDesktopUserAgent()
         return try await withCheckedThrowingContinuation { [self] cont in
             DispatchQueue.main.async {
                 self.continuation = cont
                 self.didStartDataScript = false
 
                 let config = WKWebViewConfiguration()
+                config.websiteDataStore = .nonPersistent()
 
                 let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                                    styleMask: [], backing: .buffered, defer: false)
                 win.isReleasedWhenClosed = false
                 let wv = WKWebView(frame: win.contentView!.bounds, configuration: config)
                 // Match Claude Desktop's Electron User-Agent so Cloudflare honors its cf_clearance cookie.
-                wv.customUserAgent = Self.claudeDesktopUserAgent()
+                wv.customUserAgent = userAgent
                 wv.navigationDelegate = self
                 win.contentView?.addSubview(wv)
                 self.webView = wv
@@ -3993,16 +4039,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
                 // WKWebView cookie store so both Cloudflare and claude.ai's client-side auth see a valid
                 // session. Request-header injection alone fails: the SPA re-checks cookies client-side.
                 let store = wv.configuration.websiteDataStore.httpCookieStore
-                let httpOnlyNames: Set<String> = ["sessionKey", "cf_clearance", "__cf_bm", "routingHint"]
-                var httpCookies: [HTTPCookie] = []
-                for (name, info) in claudeCookies {
-                    var props: [HTTPCookiePropertyKey: Any] = [
-                        .name: name, .value: info.value, .domain: info.domain, .path: info.path,
-                    ]
-                    if info.isSecure { props[.secure] = true }
-                    if httpOnlyNames.contains(name) { props[.init(rawValue: "HttpOnly")] = true }
-                    if let cookie = HTTPCookie(properties: props) { httpCookies.append(cookie) }
-                }
+                let httpCookies = Self.httpCookies(from: claudeCookies)
 
                 let usageURL = URL(string: "https://claude.ai/settings/usage")!
                 var didLoad = false
@@ -4029,41 +4066,122 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Build a User-Agent matching the installed Claude Desktop's Electron runtime so that the
-    /// cf_clearance cookie (issued to that UA) is accepted by Cloudflare. Versions are read from
-    /// the installed app at runtime, with a sane fallback if extraction fails.
-    private static func claudeDesktopUserAgent() -> String {
-        let fallback = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 Electron/41.6.1 Safari/537.36"
+    private static func httpCookies(from claudeCookies: [String: ClaudeCookieInfo]) -> [HTTPCookie] {
+        let httpOnlyNames: Set<String> = ["sessionKey", "cf_clearance", "__cf_bm", "routingHint"]
+        var httpCookies: [HTTPCookie] = []
+        for (name, info) in claudeCookies {
+            var props: [HTTPCookiePropertyKey: Any] = [
+                .name: name, .value: info.value, .domain: info.domain, .path: info.path,
+            ]
+            if info.isSecure { props[.secure] = true }
+            if httpOnlyNames.contains(name) { props[.init(rawValue: "HttpOnly")] = true }
+            if let cookie = HTTPCookie(properties: props) { httpCookies.append(cookie) }
+        }
+        return httpCookies
+    }
+
+    private actor UserAgentCache {
+        private var cached: String?
+
+        func value(build: @Sendable @escaping () -> String) async -> String {
+            if let cached { return cached }
+            let userAgent = await Task.detached(priority: .utility) {
+                build()
+            }.value
+            cached = userAgent
+            return userAgent
+        }
+    }
+
+    private static let userAgentCache = UserAgentCache()
+
+    /// Build a User-Agent matching the installed Claude Desktop's Electron runtime. The expensive
+    /// binary scan, when needed, runs in a child process and is cached so this menu-bar app never
+    /// maps Claude's large Electron framework into its own address space.
+    private static func claudeDesktopUserAgent() async -> String {
+        await userAgentCache.value {
+            buildClaudeDesktopUserAgent()
+        }
+    }
+
+    private static func buildClaudeDesktopUserAgent() -> String {
+        let fallbackChrome = "146.0.7680.216"
+        let fallbackElectron = "41.6.1"
         let fm = FileManager.default
         let appPath = ["/Applications/Claude.app",
                        fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Claude.app").path]
             .first(where: { fm.fileExists(atPath: $0) })
-        guard let appPath else { return fallback }
+        guard let appPath else {
+            return formattedClaudeDesktopUserAgent(
+                claudeVersion: "",
+                chrome: fallbackChrome,
+                electron: fallbackElectron
+            )
+        }
 
         let claudeVersion = (Bundle(path: appPath)?.infoDictionary?["CFBundleShortVersionString"] as? String) ?? ""
-        let electronBinary = "\(appPath)/Contents/Frameworks/Electron Framework.framework/Electron Framework"
-        guard fm.fileExists(atPath: electronBinary),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: electronBinary), options: .mappedIfSafe),
-              let text = String(data: data, encoding: .isoLatin1)
-        else {
-            return fallback
-        }
+        let electron = electronFrameworkVersion(appPath: appPath) ?? fallbackElectron
+        let chrome = chromeVersionFromElectronBinary(appPath: appPath) ?? fallbackChrome
+        return formattedClaudeDesktopUserAgent(
+            claudeVersion: claudeVersion,
+            chrome: chrome,
+            electron: electron
+        )
+    }
 
-        func firstMatch(_ pattern: String) -> String? {
-            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
-            let range = NSRange(text.startIndex..., in: text)
-            guard let m = re.firstMatch(in: text, range: range), let r = Range(m.range(at: 1), in: text) else { return nil }
-            return String(text[r])
-        }
-
-        guard let chrome = firstMatch("Chrome/([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)"),
-              let electron = firstMatch("Electron/([0-9]+\\.[0-9]+\\.[0-9]+)")
-        else {
-            return fallback
-        }
-
+    private static func formattedClaudeDesktopUserAgent(claudeVersion: String, chrome: String, electron: String) -> String {
         let claudePart = claudeVersion.isEmpty ? "" : "Claude/\(claudeVersion) "
         return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \(claudePart)Chrome/\(chrome) Electron/\(electron) Safari/537.36"
+    }
+
+    private static func electronFrameworkVersion(appPath: String) -> String? {
+        let frameworkPath = "\(appPath)/Contents/Frameworks/Electron Framework.framework"
+        guard let version = Bundle(path: frameworkPath)?.infoDictionary?["CFBundleVersion"] as? String,
+              !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return version.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func chromeVersionFromElectronBinary(appPath: String) -> String? {
+        let binaryPath = "\(appPath)/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+        guard FileManager.default.fileExists(atPath: binaryPath) else { return nil }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "/usr/bin/strings \(shellQuoted(binaryPath)) | /usr/bin/grep -Eom 1 'Chrome/[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+'"
+        ]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        let deadline = Date().addingTimeInterval(3)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+        process.waitUntilExit()
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let output, output.hasPrefix("Chrome/") else { return nil }
+        let version = String(output.dropFirst("Chrome/".count))
+        return version.isEmpty ? nil : version
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func prepareAllClaudeCookies(allowsUserInteraction: Bool) async throws -> [String: ClaudeCookieInfo] {
@@ -4273,6 +4391,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
         didStartDataScript = false
         webView?.stopLoading()
         webView?.navigationDelegate = nil
+        webView?.removeFromSuperview()
         webView = nil
         continuation?.resume(with: result)
         continuation = nil

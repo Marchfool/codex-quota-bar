@@ -40,7 +40,7 @@ final class MemoryMonitorController: ObservableObject {
     private var statusItem: NSStatusItem?
     private var timer: Timer?
     private var history: [MemoryPoint] = []
-    private let sampleInterval: TimeInterval = 1
+    private let sampleInterval: TimeInterval = 2
     private let historyWindow: TimeInterval = 60
     private let menu = NSMenu()
     private var breakdownItems: [String: NSMenuItem] = [:]

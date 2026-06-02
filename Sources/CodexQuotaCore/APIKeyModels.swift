@@ -112,6 +112,18 @@ public extension APIKeyProviderConfig {
     var hasReadySnapshot: Bool {
         lastSnapshot?.setupState == .ready
     }
+
+    /// True if this provider was configured and is either working or in a transient-failure
+    /// state (e.g. keychain timeout / network error) that should be auto-retried on the next
+    /// launch/poll. Excludes genuinely-unconfigured providers (`configurationRequired`).
+    var shouldAutoRefreshOnSchedule: Bool {
+        switch lastSnapshot?.setupState {
+        case .ready, .fetchFailed:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 public enum APIRefreshTrigger: String, Codable, Sendable {
