@@ -82,7 +82,7 @@ public struct APIKeyProviderConfig: Codable, Equatable, Identifiable, Sendable {
                 displayName: APIKeyProviderID.minimax.displayName,
                 colorHex: APIKeyProviderID.minimax.colorHex,
                 fields: [
-                    APIKeyField(key: "apiKey", label: "API Key", placeholder: "eyJhbGci...", isSecure: true)
+                    APIKeyField(key: "apiKey", label: "Token Plan 订阅 Key", placeholder: "eyJhbGci...", isSecure: true)
                 ]
             ),
             APIKeyProviderConfig(

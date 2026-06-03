@@ -23,6 +23,7 @@ struct TestRunner {
         try codexImportStoresClientIDFromAccessTokenWhenIDTokenOmitsIt()
         try apiKeyStoreDoesNotPersistSecureValues()
         try minimaxPrefersResponseRemainingPercentWhenCountsAreZero()
+        try minimaxDecodesResponseResetTimes()
         await launchRefreshSkipsSecureProviderReadsButUpdatesClaude()
         await launchRefreshUsesNonInteractiveSecretReads()
         copyAvailabilityUsesSnapshotsOnly()
@@ -339,6 +340,40 @@ struct TestRunner {
         expect(snapshot.extras["weeklyUsedPercent"] == "2", "MiniMax weekly used percent should invert response remaining percent")
         expect(snapshot.status == .ok, "MiniMax percent quota should not warn just because count totals are zero")
         expect(snapshot.note == nil, "MiniMax percent quota should not show an unavailable quota note")
+    }
+
+    static func minimaxDecodesResponseResetTimes() throws {
+        let provider = LLMBalanceProvider()
+        let snapshot = try provider.decodeBalance(data: Data("""
+        {
+          "base_resp": {"status_code": 0, "status_msg": "success"},
+          "model_remains": [
+            {
+              "model_name": "general",
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "current_interval_total_count": 0,
+              "current_interval_usage_count": 0,
+              "current_interval_remaining_percent": 98,
+              "current_weekly_remaining_percent": 98,
+              "remains_time": 16886990,
+              "weekly_remains_time": 394886990,
+              "end_time": 1780470000000,
+              "weekly_end_time": 1780848000000
+            }
+          ]
+        }
+        """.utf8), providerID: .minimax)
+
+        expect(
+            snapshot.extras["intervalResetAt"].flatMap(DateCoding.parseISO8601) == Date(timeIntervalSince1970: 1_780_470_000),
+            "MiniMax interval reset should prefer response end_time"
+        )
+        expect(
+            snapshot.extras["weeklyResetAt"].flatMap(DateCoding.parseISO8601) == Date(timeIntervalSince1970: 1_780_848_000),
+            "MiniMax weekly reset should come from response weekly_end_time"
+        )
+        expect(snapshot.extras["weeklyRemainsTime"] == "109小时41分", "MiniMax weekly remaining time should be readable")
     }
 
     static func claudeErrorSnapshotsAreActionable() {
