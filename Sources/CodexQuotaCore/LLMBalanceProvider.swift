@@ -151,14 +151,24 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         let weeklyTotal = model.currentWeeklyTotalCount
         let weeklyUsed = model.currentWeeklyUsageCount
         let weeklyRemains = max(0, weeklyTotal - weeklyUsed)
-        let weeklyPercent = weeklyTotal > 0 ? min(100, Int((Double(weeklyUsed) / Double(weeklyTotal) * 100).rounded())) : 0
+        let weeklyHasSignal = weeklyTotal > 0 || model.currentWeeklyRemainingPercent != nil
+        let weeklyRemainingPercent = model.currentWeeklyRemainingPercent.map(clampPercent)
+            ?? (weeklyTotal > 0 ? max(0, 100 - percentUsed(used: weeklyUsed, total: weeklyTotal)) : 0)
+        let weeklyPercent = max(0, 100 - weeklyRemainingPercent)
         let intervalTotal = model.currentIntervalTotalCount
         let intervalUsed = model.currentIntervalUsageCount
         let intervalRemains = max(0, intervalTotal - intervalUsed)
-        let intervalPercent = intervalTotal > 0 ? min(100, Int((Double(intervalUsed) / Double(intervalTotal) * 100).rounded())) : 0
+        let intervalHasSignal = intervalTotal > 0 || model.currentIntervalRemainingPercent != nil
+        let intervalRemainingPercent = model.currentIntervalRemainingPercent.map(clampPercent)
+            ?? (intervalTotal > 0 ? max(0, 100 - percentUsed(used: intervalUsed, total: intervalTotal)) : 0)
+        let intervalPercent = max(0, 100 - intervalRemainingPercent)
         let intervalMinutes = model.remainsTime / 60_000
         let intervalTime = "\(intervalMinutes / 60)小时\(intervalMinutes % 60)分"
         let intervalResetAt = Date().addingTimeInterval(TimeInterval(model.remainsTime / 1000))
+        let hasAnyQuota = weeklyHasSignal || intervalHasSignal
+        let isWarning = !hasAnyQuota
+            || (weeklyHasSignal && weeklyRemainingPercent <= 0)
+            || (intervalHasSignal && intervalRemainingPercent <= 0)
 
         return APIBalanceSnapshot(
             balance: "\(weeklyRemains)",
@@ -167,23 +177,33 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
             usedPercent: weeklyPercent,
             unit: "次/周",
             currency: "TokenPlan",
-            status: weeklyRemains <= 0 ? .warning : .ok,
+            status: isWarning ? .warning : .ok,
+            note: hasAnyQuota ? nil : "MiniMax 接口未返回可用 Token Plan 额度",
             extras: [
                 "weeklyRemains": "\(weeklyRemains)",
                 "weeklyUsed": "\(weeklyUsed)",
                 "weeklyTotal": "\(weeklyTotal)",
                 "weeklyUsedPercent": "\(weeklyPercent)",
-                "weeklyRemainingPercent": "\(max(0, 100 - weeklyPercent))",
+                "weeklyRemainingPercent": "\(weeklyRemainingPercent)",
                 "modelName": model.modelName,
                 "intervalRemains": "\(intervalRemains)",
                 "intervalUsed": "\(intervalUsed)",
                 "intervalTotal": "\(intervalTotal)",
                 "intervalUsedPercent": "\(intervalPercent)",
-                "intervalRemainingPercent": "\(max(0, 100 - intervalPercent))",
+                "intervalRemainingPercent": "\(intervalRemainingPercent)",
                 "intervalRemainsTime": intervalTime,
                 "intervalResetAt": DateCoding.formatISO8601(intervalResetAt)
             ]
         )
+    }
+
+    private func percentUsed(used: Int, total: Int) -> Int {
+        guard total > 0 else { return 0 }
+        return clampPercent(Int((Double(used) / Double(total) * 100).rounded()))
+    }
+
+    private func clampPercent(_ value: Int) -> Int {
+        min(100, max(0, value))
     }
 
     private func decodeComfly(_ data: Data) throws -> APIBalanceSnapshot {
@@ -517,6 +537,8 @@ private struct MiniMaxModelRemain: Decodable {
     var currentWeeklyUsageCount: Int
     var currentIntervalTotalCount: Int
     var currentIntervalUsageCount: Int
+    var currentWeeklyRemainingPercent: Int?
+    var currentIntervalRemainingPercent: Int?
     var remainsTime: Int
 
     enum CodingKeys: String, CodingKey {
@@ -525,6 +547,8 @@ private struct MiniMaxModelRemain: Decodable {
         case currentWeeklyUsageCount = "current_weekly_usage_count"
         case currentIntervalTotalCount = "current_interval_total_count"
         case currentIntervalUsageCount = "current_interval_usage_count"
+        case currentWeeklyRemainingPercent = "current_weekly_remaining_percent"
+        case currentIntervalRemainingPercent = "current_interval_remaining_percent"
         case remainsTime = "remains_time"
     }
 }

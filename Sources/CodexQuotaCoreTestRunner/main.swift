@@ -22,6 +22,7 @@ struct TestRunner {
         try codexCredentialFingerprintIgnoresTokenRotation()
         try codexImportStoresClientIDFromAccessTokenWhenIDTokenOmitsIt()
         try apiKeyStoreDoesNotPersistSecureValues()
+        try minimaxPrefersResponseRemainingPercentWhenCountsAreZero()
         await launchRefreshSkipsSecureProviderReadsButUpdatesClaude()
         await launchRefreshUsesNonInteractiveSecretReads()
         copyAvailabilityUsesSnapshotsOnly()
@@ -309,6 +310,35 @@ struct TestRunner {
         } catch APIBalanceError.provider(let message) {
             expect(message == "token invalid", "expected Comfly provider message")
         }
+    }
+
+    static func minimaxPrefersResponseRemainingPercentWhenCountsAreZero() throws {
+        let provider = LLMBalanceProvider()
+        let snapshot = try provider.decodeBalance(data: Data("""
+        {
+          "base_resp": {"status_code": 0, "status_msg": "success"},
+          "model_remains": [
+            {
+              "model_name": "general",
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "current_interval_total_count": 0,
+              "current_interval_usage_count": 0,
+              "current_interval_remaining_percent": 99,
+              "current_weekly_remaining_percent": 98,
+              "remains_time": 17944325
+            }
+          ]
+        }
+        """.utf8), providerID: .minimax)
+
+        expect(snapshot.usedPercent == 2, "MiniMax headline usage should prefer response weekly remaining percent")
+        expect(snapshot.extras["intervalRemainingPercent"] == "99", "MiniMax interval remaining percent should come from response")
+        expect(snapshot.extras["weeklyRemainingPercent"] == "98", "MiniMax weekly remaining percent should come from response")
+        expect(snapshot.extras["intervalUsedPercent"] == "1", "MiniMax interval used percent should invert response remaining percent")
+        expect(snapshot.extras["weeklyUsedPercent"] == "2", "MiniMax weekly used percent should invert response remaining percent")
+        expect(snapshot.status == .ok, "MiniMax percent quota should not warn just because count totals are zero")
+        expect(snapshot.note == nil, "MiniMax percent quota should not show an unavailable quota note")
     }
 
     static func claudeErrorSnapshotsAreActionable() {
