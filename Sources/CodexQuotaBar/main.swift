@@ -1352,8 +1352,8 @@ private struct APIBalanceRow: View {
     private var meterRows: some View {
         if provider.id == .minimax {
             VStack(spacing: 4) {
-                APIUsageMeter(label: "5小时", remainingPercent: minimaxIntervalUsedPercent, color: color, intent: .usage)
-                APIUsageMeter(label: "每周", remainingPercent: minimaxWeeklyUsedPercent, color: color.opacity(0.88), intent: .usage)
+                APIUsageMeter(label: minimaxIntervalDisplay.meterLabel, remainingPercent: minimaxIntervalDisplay.barPercent, color: color)
+                APIUsageMeter(label: minimaxWeeklyDisplay.meterLabel, remainingPercent: minimaxWeeklyDisplay.barPercent, color: color.opacity(0.88))
             }
         } else if provider.id == .claude, provider.lastSnapshot?.extras["fiveHourUsed"] != nil {
             VStack(spacing: 4) {
@@ -1441,7 +1441,7 @@ private struct APIBalanceRow: View {
         case .deepseek:
             return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
         case .minimax:
-            return minimaxIntervalUsedPercent
+            return minimaxIntervalDisplay.barPercent
         case .comfly:
             return max(0, 100 - snapshot.usedPercent)
         case .claude:
@@ -1452,14 +1452,14 @@ private struct APIBalanceRow: View {
         }
     }
 
-    private var minimaxIntervalUsedPercent: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return minimaxUsedPercent(snapshot, usedKey: "intervalQuotaUsedPercent")
+    private var minimaxIntervalDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .interval)
     }
 
-    private var minimaxWeeklyUsedPercent: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return minimaxUsedPercent(snapshot, usedKey: "weeklyQuotaUsedPercent")
+    private var minimaxWeeklyDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .weekly)
     }
 }
 
@@ -1569,8 +1569,8 @@ private struct APIBalanceCard: View {
                 )
             }
         } else if provider.id == .minimax, provider.lastSnapshot != nil {
-            metricLine(title: "5小时", value: minimaxIntervalTotalDisplay, meterLabel: "已用", percent: minimaxIntervalUsedPercent, intent: .usage)
-            metricLine(title: "每周", value: minimaxWeeklyTotalDisplay, meterLabel: "已用", percent: minimaxWeeklyUsedPercent, intent: .usage)
+            metricLine(title: "5小时", value: minimaxIntervalDisplay.summary, meterLabel: minimaxIntervalDisplay.meterLabel, percent: minimaxIntervalDisplay.barPercent)
+            metricLine(title: "每周", value: minimaxWeeklyDisplay.summary, meterLabel: minimaxWeeklyDisplay.meterLabel, percent: minimaxWeeklyDisplay.barPercent)
         }
     }
 
@@ -1600,12 +1600,12 @@ private struct APIBalanceCard: View {
     }
 
     @ViewBuilder
-    private func metricLine(title: String, value: String, meterLabel: String, percent: Int, intent: MeterIntent = .remaining) -> some View {
+    private func metricLine(title: String, value: String, meterLabel: String, percent: Int) -> some View {
         HStack(alignment: .center, spacing: 8) {
             cardMetaLine(title, value: value)
                 .frame(width: MainCardGrid.valueColumnWidth, alignment: .leading)
             Spacer(minLength: 0)
-            APIUsageMeter(label: meterLabel, remainingPercent: percent, color: color, intent: intent)
+            APIUsageMeter(label: meterLabel, remainingPercent: percent, color: color)
                 .frame(width: MainCardGrid.meterColumnWidth)
         }
     }
@@ -1759,39 +1759,23 @@ private struct APIBalanceCard: View {
         return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
     }
 
-    private var minimaxIntervalTotalDisplay: String {
-        guard let snapshot = provider.lastSnapshot else { return "--" }
-        return minimaxTotalDisplay(snapshot, totalKey: "intervalQuotaTotalPercent")
+    private var minimaxIntervalDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .interval)
     }
 
-    private var minimaxWeeklyTotalDisplay: String {
-        guard let snapshot = provider.lastSnapshot else { return "--" }
-        return minimaxTotalDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent")
+    private var minimaxWeeklyDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .weekly)
     }
-
-    private var minimaxIntervalUsedPercent: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return minimaxUsedPercent(snapshot, usedKey: "intervalQuotaUsedPercent")
-    }
-
-    private var minimaxWeeklyUsedPercent: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return minimaxUsedPercent(snapshot, usedKey: "weeklyQuotaUsedPercent")
-    }
-}
-
-private enum MeterIntent {
-    case remaining
-    case usage
 }
 
 private struct APIUsageMeter: View {
     let label: String?
     let remainingPercent: Int
     let color: Color
-    var intent: MeterIntent = .remaining
 
-    private var barColor: Color { meterColor(remainingPercent, intent: intent) }
+    private var barColor: Color { quotaColor(remainingPercent) }
     private var clamped: CGFloat { CGFloat(max(0, min(100, remainingPercent))) }
     private let labelWidth: CGFloat = MainCardGrid.meterLabelWidth
 
@@ -2065,11 +2049,10 @@ private struct SubscriptionCardStack: View {
                 color: Color(hex: "#7C3AED") ?? .purple,
                 subtitleLabel: "额度",
                 subtitle: minimaxSubtitle,
-                primaryLabel: "5小时", primaryValue: minimaxIntervalUsedPercent,
-                primaryMeterLabel: "已用",
-                secondaryLabel: "每周", secondaryValue: minimaxWeeklyUsedPercent,
-                secondaryMeterLabel: "已用",
-                meterIntent: .usage,
+                primaryLabel: "5小时", primaryValue: minimaxIntervalDisplay.barPercent,
+                primaryMeterLabel: minimaxIntervalDisplay.meterLabel,
+                secondaryLabel: "每周", secondaryValue: minimaxWeeklyDisplay.barPercent,
+                secondaryMeterLabel: minimaxWeeklyDisplay.meterLabel,
                 resetLines: minimaxResetLines,
                 refreshCadence: refreshCadence,
                 isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.minimax),
@@ -2180,8 +2163,8 @@ private struct SubscriptionCardStack: View {
 
     private var minimaxResetLines: [String] {
         guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return [] }
-        let intervalLine = "5小时 \(minimaxTotalDisplay(snapshot, totalKey: "intervalQuotaTotalPercent"))"
-        let weeklyLine = "每周 \(minimaxTotalDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent"))"
+        let intervalLine = "5小时 \(minimaxWindowDisplay(snapshot, window: .interval).summary)"
+        let weeklyLine = "每周 \(minimaxWindowDisplay(snapshot, window: .weekly).summary)"
         return [intervalLine, weeklyLine]
     }
 
@@ -2199,14 +2182,14 @@ private struct SubscriptionCardStack: View {
         return fallback ?? "--"
     }
 
-    private var minimaxIntervalUsedPercent: Int {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return 0 }
-        return minimaxUsedPercent(snapshot, usedKey: "intervalQuotaUsedPercent")
+    private var minimaxIntervalDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .interval)
     }
 
-    private var minimaxWeeklyUsedPercent: Int {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return 0 }
-        return minimaxUsedPercent(snapshot, usedKey: "weeklyQuotaUsedPercent")
+    private var minimaxWeeklyDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .weekly)
     }
 }
 
@@ -2640,7 +2623,6 @@ private struct FloatingProviderCard: View {
     var tertiaryLabel: String? = nil
     var tertiaryValue: Int? = nil
     var tertiaryMeterLabel: String? = nil
-    var meterIntent: MeterIntent = .remaining
     var resetLines: [String] = []
     var statusColor: Color? = nil      // when set, header dot + border breathe with this color
     var statusRunning: Bool = false
@@ -2760,7 +2742,7 @@ private struct FloatingProviderCard: View {
                 .minimumScaleFactor(0.68)
                 .frame(width: FloatingCardGrid.valueColumnWidth, alignment: .leading)
             Spacer(minLength: 0)
-            FloatingCompactBar(label: meterLabel, value: percent, intent: meterIntent)
+            FloatingCompactBar(label: meterLabel, value: percent)
                 .frame(width: FloatingCardGrid.meterColumnWidth)
         }
     }
@@ -2769,8 +2751,7 @@ private struct FloatingProviderCard: View {
 private struct FloatingCompactBar: View {
     let label: String?
     let value: Int
-    var intent: MeterIntent = .remaining
-    private var barColor: Color { meterColor(value, intent: intent) }
+    private var barColor: Color { quotaColor(value) }
     private let labelWidth: CGFloat = FloatingCardGrid.meterLabelWidth
 
     var body: some View {
@@ -2842,7 +2823,7 @@ private struct FloatingAPIBalanceCard: View {
                     .minimumScaleFactor(0.78)
                     .frame(width: FloatingCardGrid.valueColumnWidth, alignment: .leading)
                 Spacer(minLength: 0)
-                FloatingCompactBar(label: nil, value: meterPercent, intent: meterIntent)
+                FloatingCompactBar(label: nil, value: remainingPercent)
                     .frame(width: FloatingCardGrid.meterColumnWidth)
             }
         }
@@ -2927,22 +2908,10 @@ private struct FloatingAPIBalanceCard: View {
         case .comfly:
             return max(0, 100 - snapshot.usedPercent)
         case .minimax:
-            return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+            return minimaxWindowDisplay(snapshot, window: .interval).barPercent
         case .claude:
             return max(0, 100 - snapshot.usedPercent)
         }
-    }
-
-    private var meterPercent: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        if provider.id == .minimax {
-            return minimaxUsedPercent(snapshot, usedKey: "intervalQuotaUsedPercent")
-        }
-        return remainingPercent
-    }
-
-    private var meterIntent: MeterIntent {
-        provider.id == .minimax ? .usage : .remaining
     }
 
 }
@@ -3005,22 +2974,10 @@ private func quotaColor(_ value: Int?) -> Color {
     return Color(red: 0.15, green: 0.85, blue: 0.45)
 }
 
-private func meterColor(_ value: Int?, intent: MeterIntent) -> Color {
-    switch intent {
-    case .remaining:
-        return quotaColor(value)
-    case .usage:
-        guard let value else { return .white.opacity(0.46) }
-        if value >= 90 { return Color(red: 0.85, green: 0.28, blue: 0.28) }
-        if value >= 70 { return Color(red: 0.90, green: 0.65, blue: 0.20) }
-        return Color(red: 0.15, green: 0.85, blue: 0.45)
-    }
-}
-
 private func minimaxQuotaSummary(_ snapshot: APIBalanceSnapshot) -> String {
     if snapshot.extras["intervalQuotaTotalPercent"] != nil || snapshot.extras["weeklyQuotaTotalPercent"] != nil {
-        let interval = minimaxUsageDisplay(snapshot, totalKey: "intervalQuotaTotalPercent", usedKey: "intervalQuotaUsedPercent")
-        let weekly = minimaxUsageDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent", usedKey: "weeklyQuotaUsedPercent")
+        let interval = minimaxWindowDisplay(snapshot, window: .interval).summary
+        let weekly = minimaxWindowDisplay(snapshot, window: .weekly).summary
         return "5小时 \(interval) · 每周 \(weekly)"
     }
     let intervalTotal = Int(snapshot.extras["intervalTotal"] ?? "") ?? 0
@@ -3035,15 +2992,37 @@ private func minimaxQuotaSummary(_ snapshot: APIBalanceSnapshot) -> String {
     return "5小时剩余 \(intervalRemaining)% · 每周剩余 \(weeklyRemaining)%"
 }
 
-private func minimaxTotalDisplay(_ snapshot: APIBalanceSnapshot, totalKey: String) -> String {
-    guard let total = snapshot.extras[totalKey] else {
-        return "--"
-    }
-    return "总额\(total)%"
+private enum MiniMaxQuotaWindow {
+    case interval
+    case weekly
 }
 
-private func minimaxUsedPercent(_ snapshot: APIBalanceSnapshot, usedKey: String) -> Int {
-    Int(snapshot.extras[usedKey] ?? "") ?? snapshot.usedPercent
+private let emptyMiniMaxQuotaDisplay = MiniMaxQuotaWindowDisplay(
+    summary: "--",
+    meterLabel: "--",
+    barPercent: 0,
+    trailingLabel: "--"
+)
+
+private func minimaxWindowDisplay(_ snapshot: APIBalanceSnapshot, window: MiniMaxQuotaWindow) -> MiniMaxQuotaWindowDisplay {
+    switch window {
+    case .interval:
+        return MiniMaxQuotaDisplay.window(
+            extras: snapshot.extras,
+            remainingKey: "intervalRemainingPercent",
+            totalKey: "intervalQuotaTotalPercent",
+            usedKey: "intervalQuotaUsedPercent",
+            fallbackUsedPercent: snapshot.usedPercent
+        )
+    case .weekly:
+        return MiniMaxQuotaDisplay.window(
+            extras: snapshot.extras,
+            remainingKey: "weeklyRemainingPercent",
+            totalKey: "weeklyQuotaTotalPercent",
+            usedKey: "weeklyQuotaUsedPercent",
+            fallbackUsedPercent: snapshot.usedPercent
+        )
+    }
 }
 
 private func minimaxUsageDisplay(_ snapshot: APIBalanceSnapshot, totalKey: String, usedKey: String) -> String {

@@ -9,6 +9,7 @@ struct CodexQuotaBarFrameTestRunner {
         initialFrameUsesDefaultSizeNearTopRightWhenNothingIsStored()
         initialFrameRestoresSavedFrame()
         claudeCookieDomainFilterOnlyAllowsClaudeHosts()
+        miniMaxBoostedQuotaDisplayUsesRawRemainingBar()
         print("All CodexQuotaBar frame tests passed.")
     }
 
@@ -53,6 +54,26 @@ struct CodexQuotaBarFrameTestRunner {
         expect(ClaudeCookieDomainFilter.isAllowedDomain("console.claude.ai"), "expected Claude subdomain")
         expect(!ClaudeCookieDomainFilter.isAllowedDomain("evilclaude.ai"), "expected suffix lookalike to be rejected")
         expect(!ClaudeCookieDomainFilter.isAllowedDomain("claude.ai.evil.example"), "expected superdomain lookalike to be rejected")
+    }
+
+    private static func miniMaxBoostedQuotaDisplayUsesRawRemainingBar() {
+        let display = MiniMaxQuotaDisplay.window(
+            extras: [
+                "intervalRemainingPercent": "98",
+                "intervalQuotaTotalPercent": "200",
+                "intervalQuotaUsedPercent": "4",
+                "intervalQuotaRemainingPercent": "196"
+            ],
+            remainingKey: "intervalRemainingPercent",
+            totalKey: "intervalQuotaTotalPercent",
+            usedKey: "intervalQuotaUsedPercent",
+            fallbackUsedPercent: 4
+        )
+
+        expect(display.summary == "总额200% · 已用4%", "expected boosted quota summary")
+        expect(display.meterLabel == "200%", "expected meter label to show boosted total")
+        expect(display.barPercent == 98, "expected bar to use raw remaining percent")
+        expect(display.trailingLabel == "98%", "expected trailing label to match the bar")
     }
 
     private static func isolatedDefaults() -> UserDefaults {
