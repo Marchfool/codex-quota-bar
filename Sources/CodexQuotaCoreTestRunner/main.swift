@@ -356,6 +356,8 @@ struct TestRunner {
               "current_interval_usage_count": 0,
               "current_interval_remaining_percent": 98,
               "current_weekly_remaining_percent": 98,
+              "interval_boost_permille": 2000,
+              "weekly_boost_permille": 3000,
               "remains_time": 16886990,
               "weekly_remains_time": 394886990,
               "end_time": 1780470000000,
@@ -365,6 +367,13 @@ struct TestRunner {
         }
         """.utf8), providerID: .minimax)
 
+        expect(snapshot.usedPercent == 6, "MiniMax headline usage should account for weekly boost")
+        expect(snapshot.extras["intervalQuotaTotalPercent"] == "200", "MiniMax interval total should account for boost")
+        expect(snapshot.extras["intervalQuotaUsedPercent"] == "4", "MiniMax interval used should match console boost-adjusted display")
+        expect(snapshot.extras["intervalQuotaRemainingPercent"] == "196", "MiniMax interval remaining should match boosted quota")
+        expect(snapshot.extras["weeklyQuotaTotalPercent"] == "300", "MiniMax weekly total should account for boost")
+        expect(snapshot.extras["weeklyQuotaUsedPercent"] == "6", "MiniMax weekly used should match console boost-adjusted display")
+        expect(snapshot.extras["weeklyQuotaRemainingPercent"] == "294", "MiniMax weekly remaining should match boosted quota")
         expect(
             snapshot.extras["intervalResetAt"].flatMap(DateCoding.parseISO8601) == Date(timeIntervalSince1970: 1_780_470_000),
             "MiniMax interval reset should prefer response end_time"

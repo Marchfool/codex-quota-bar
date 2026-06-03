@@ -1392,11 +1392,6 @@ private struct APIBalanceRow: View {
         return snapshot.balance
     }
 
-    private var statusText: String {
-        guard provider.lastSnapshot != nil else { return "--" }
-        return "\(remainingPercent)%"
-    }
-
     private var updatedText: String {
         guard let updatedAt = provider.lastSnapshot?.updatedAt else { return "尚未更新" }
         return QuotaFormatters.updatedText(updatedAt)
@@ -1574,8 +1569,8 @@ private struct APIBalanceCard: View {
                 )
             }
         } else if provider.id == .minimax, provider.lastSnapshot != nil {
-            metricLine(title: "5小时", value: minimaxResetDisplay, meterLabel: minimaxRemainingLabel, percent: minimaxIntervalRemaining)
-            metricLine(title: "每周", value: minimaxWeeklyResetDisplay, meterLabel: minimaxWeeklyRemainingLabel, percent: minimaxWeeklyRemaining)
+            metricLine(title: "5小时", value: minimaxIntervalUsageDisplay, meterLabel: minimaxRemainingLabel, percent: minimaxIntervalRemaining)
+            metricLine(title: "每周", value: minimaxWeeklyUsageDisplay, meterLabel: minimaxWeeklyRemainingLabel, percent: minimaxWeeklyRemaining)
         }
     }
 
@@ -1764,14 +1759,14 @@ private struct APIBalanceCard: View {
         return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
     }
 
-    private var minimaxResetDisplay: String {
-        guard let snapshot = provider.lastSnapshot else { return "重置时间 --" }
-        return minimaxResetText(snapshot, key: "intervalResetAt", fallbackKey: "intervalRemainsTime")
+    private var minimaxIntervalUsageDisplay: String {
+        guard let snapshot = provider.lastSnapshot else { return "--" }
+        return minimaxUsageDisplay(snapshot, totalKey: "intervalQuotaTotalPercent", usedKey: "intervalQuotaUsedPercent")
     }
 
-    private var minimaxWeeklyResetDisplay: String {
-        guard let snapshot = provider.lastSnapshot else { return "重置时间 --" }
-        return minimaxResetText(snapshot, key: "weeklyResetAt", fallbackKey: "weeklyRemainsTime")
+    private var minimaxWeeklyUsageDisplay: String {
+        guard let snapshot = provider.lastSnapshot else { return "--" }
+        return minimaxUsageDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent", usedKey: "weeklyQuotaUsedPercent")
     }
 
     private var minimaxRemainingLabel: String {
@@ -2065,9 +2060,9 @@ private struct SubscriptionCardStack: View {
                 subtitleLabel: "额度",
                 subtitle: minimaxSubtitle,
                 primaryLabel: "5小时", primaryValue: apiRemaining(.minimax),
-                primaryMeterLabel: minimaxFloatingRemainingLabel,
+                primaryMeterLabel: minimaxIntervalRemainingPercentLabel,
                 secondaryLabel: "每周", secondaryValue: apiWeeklyRemaining(.minimax),
-                secondaryMeterLabel: minimaxWeeklyFloatingRemainingLabel,
+                secondaryMeterLabel: minimaxWeeklyRemainingPercentLabel,
                 resetLines: minimaxResetLines,
                 refreshCadence: refreshCadence,
                 isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.minimax),
@@ -2178,8 +2173,8 @@ private struct SubscriptionCardStack: View {
 
     private var minimaxResetLines: [String] {
         guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return [] }
-        let intervalLine = "5小时 \(minimaxResetText(snapshot, key: "intervalResetAt", fallbackKey: "intervalRemainsTime"))"
-        let weeklyLine = "每周 \(minimaxResetText(snapshot, key: "weeklyResetAt", fallbackKey: "weeklyRemainsTime"))"
+        let intervalLine = "5小时 \(minimaxUsageDisplay(snapshot, totalKey: "intervalQuotaTotalPercent", usedKey: "intervalQuotaUsedPercent"))"
+        let weeklyLine = "每周 \(minimaxUsageDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent", usedKey: "weeklyQuotaUsedPercent"))"
         return [intervalLine, weeklyLine]
     }
 
@@ -2197,14 +2192,14 @@ private struct SubscriptionCardStack: View {
         return fallback ?? "--"
     }
 
-    private var minimaxFloatingRemainingLabel: String {
+    private var minimaxIntervalRemainingPercentLabel: String {
         guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return "--" }
-        return minimaxRemainingDurationLabel(snapshot, key: "intervalResetAt", fallbackKey: "intervalRemainsTime")
+        return "\(snapshot.extras["intervalQuotaRemainingPercent"] ?? snapshot.extras["intervalRemainingPercent"] ?? "--")%"
     }
 
-    private var minimaxWeeklyFloatingRemainingLabel: String {
+    private var minimaxWeeklyRemainingPercentLabel: String {
         guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return "--" }
-        return minimaxRemainingDurationLabel(snapshot, key: "weeklyResetAt", fallbackKey: "weeklyRemainsTime")
+        return "\(snapshot.extras["weeklyQuotaRemainingPercent"] ?? snapshot.extras["weeklyRemainingPercent"] ?? "--")%"
     }
 }
 
@@ -2990,6 +2985,11 @@ private func quotaColor(_ value: Int?) -> Color {
 }
 
 private func minimaxQuotaSummary(_ snapshot: APIBalanceSnapshot) -> String {
+    if snapshot.extras["intervalQuotaTotalPercent"] != nil || snapshot.extras["weeklyQuotaTotalPercent"] != nil {
+        let interval = minimaxUsageDisplay(snapshot, totalKey: "intervalQuotaTotalPercent", usedKey: "intervalQuotaUsedPercent")
+        let weekly = minimaxUsageDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent", usedKey: "weeklyQuotaUsedPercent")
+        return "5小时 \(interval) · 每周 \(weekly)"
+    }
     let intervalTotal = Int(snapshot.extras["intervalTotal"] ?? "") ?? 0
     let weeklyTotal = Int(snapshot.extras["weeklyTotal"] ?? "") ?? 0
     if intervalTotal > 0 || weeklyTotal > 0 {
@@ -3000,6 +3000,13 @@ private func minimaxQuotaSummary(_ snapshot: APIBalanceSnapshot) -> String {
     let intervalRemaining = snapshot.extras["intervalRemainingPercent"] ?? "\(max(0, 100 - snapshot.usedPercent))"
     let weeklyRemaining = snapshot.extras["weeklyRemainingPercent"] ?? intervalRemaining
     return "5小时剩余 \(intervalRemaining)% · 每周剩余 \(weeklyRemaining)%"
+}
+
+private func minimaxUsageDisplay(_ snapshot: APIBalanceSnapshot, totalKey: String, usedKey: String) -> String {
+    guard let total = snapshot.extras[totalKey], let used = snapshot.extras[usedKey] else {
+        return "--"
+    }
+    return "总额\(total)% · 已用\(used)%"
 }
 
 private func minimaxResetText(_ snapshot: APIBalanceSnapshot, key: String, fallbackKey: String) -> String {
@@ -3765,9 +3772,11 @@ private struct APIProviderStatsView: View {
                 stat("赠送", snapshot.extras["grantedBalance"] ?? "--")
                 stat("充值", snapshot.extras["toppedUpBalance"] ?? "--")
             case .minimax:
-                stat("5小时剩余", "\(snapshot.extras["intervalRemainingPercent"] ?? "--")%")
+                stat("5小时用量", minimaxUsageDisplay(snapshot, totalKey: "intervalQuotaTotalPercent", usedKey: "intervalQuotaUsedPercent"))
+                stat("5小时剩余", "\(snapshot.extras["intervalQuotaRemainingPercent"] ?? snapshot.extras["intervalRemainingPercent"] ?? "--")%")
                 stat("5小时重置", minimaxResetText(snapshot, key: "intervalResetAt", fallbackKey: "intervalRemainsTime"))
-                stat("每周剩余", "\(snapshot.extras["weeklyRemainingPercent"] ?? "--")%")
+                stat("每周用量", minimaxUsageDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent", usedKey: "weeklyQuotaUsedPercent"))
+                stat("每周剩余", "\(snapshot.extras["weeklyQuotaRemainingPercent"] ?? snapshot.extras["weeklyRemainingPercent"] ?? "--")%")
                 stat("每周重置", minimaxResetText(snapshot, key: "weeklyResetAt", fallbackKey: "weeklyRemainsTime"))
             case .comfly:
                 EmptyView()

@@ -154,14 +154,20 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         let weeklyHasSignal = weeklyTotal > 0 || model.currentWeeklyRemainingPercent != nil
         let weeklyRemainingPercent = model.currentWeeklyRemainingPercent.map(clampPercent)
             ?? (weeklyTotal > 0 ? max(0, 100 - percentUsed(used: weeklyUsed, total: weeklyTotal)) : 0)
-        let weeklyPercent = max(0, 100 - weeklyRemainingPercent)
+        let weeklyQuotaTotalPercent = boostedTotalPercent(model.weeklyBoostPermille)
+        let weeklyQuotaRemainingPercent = boostedPercent(weeklyRemainingPercent, boostPermille: model.weeklyBoostPermille)
+        let weeklyQuotaUsedPercent = max(0, weeklyQuotaTotalPercent - weeklyQuotaRemainingPercent)
+        let weeklyPercent = weeklyQuotaUsedPercent
         let intervalTotal = model.currentIntervalTotalCount
         let intervalUsed = model.currentIntervalUsageCount
         let intervalRemains = max(0, intervalTotal - intervalUsed)
         let intervalHasSignal = intervalTotal > 0 || model.currentIntervalRemainingPercent != nil
         let intervalRemainingPercent = model.currentIntervalRemainingPercent.map(clampPercent)
             ?? (intervalTotal > 0 ? max(0, 100 - percentUsed(used: intervalUsed, total: intervalTotal)) : 0)
-        let intervalPercent = max(0, 100 - intervalRemainingPercent)
+        let intervalQuotaTotalPercent = boostedTotalPercent(model.intervalBoostPermille)
+        let intervalQuotaRemainingPercent = boostedPercent(intervalRemainingPercent, boostPermille: model.intervalBoostPermille)
+        let intervalQuotaUsedPercent = max(0, intervalQuotaTotalPercent - intervalQuotaRemainingPercent)
+        let intervalPercent = intervalQuotaUsedPercent
         let intervalTime = durationText(milliseconds: model.remainsTime)
         let intervalResetAt = dateFromUnixTimestamp(model.endTime)
             ?? Date().addingTimeInterval(TimeInterval(model.remainsTime / 1000))
@@ -176,12 +182,18 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
             "weeklyTotal": "\(weeklyTotal)",
             "weeklyUsedPercent": "\(weeklyPercent)",
             "weeklyRemainingPercent": "\(weeklyRemainingPercent)",
+            "weeklyQuotaTotalPercent": "\(weeklyQuotaTotalPercent)",
+            "weeklyQuotaUsedPercent": "\(weeklyQuotaUsedPercent)",
+            "weeklyQuotaRemainingPercent": "\(weeklyQuotaRemainingPercent)",
             "modelName": model.modelName,
             "intervalRemains": "\(intervalRemains)",
             "intervalUsed": "\(intervalUsed)",
             "intervalTotal": "\(intervalTotal)",
             "intervalUsedPercent": "\(intervalPercent)",
             "intervalRemainingPercent": "\(intervalRemainingPercent)",
+            "intervalQuotaTotalPercent": "\(intervalQuotaTotalPercent)",
+            "intervalQuotaUsedPercent": "\(intervalQuotaUsedPercent)",
+            "intervalQuotaRemainingPercent": "\(intervalQuotaRemainingPercent)",
             "intervalRemainsTime": intervalTime,
             "intervalResetAt": DateCoding.formatISO8601(intervalResetAt)
         ]
@@ -212,6 +224,14 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
 
     private func clampPercent(_ value: Int) -> Int {
         min(100, max(0, value))
+    }
+
+    private func boostedTotalPercent(_ boostPermille: Int?) -> Int {
+        max(0, ((boostPermille ?? 1000) + 5) / 10)
+    }
+
+    private func boostedPercent(_ percent: Int, boostPermille: Int?) -> Int {
+        max(0, Int((Double(percent) * Double(boostPermille ?? 1000) / 1000).rounded()))
     }
 
     private func durationText(milliseconds: Int) -> String {
@@ -562,6 +582,8 @@ private struct MiniMaxModelRemain: Decodable {
     var weeklyRemainsTime: Int?
     var endTime: Int?
     var weeklyEndTime: Int?
+    var intervalBoostPermille: Int?
+    var weeklyBoostPermille: Int?
 
     enum CodingKeys: String, CodingKey {
         case modelName = "model_name"
@@ -575,5 +597,7 @@ private struct MiniMaxModelRemain: Decodable {
         case weeklyRemainsTime = "weekly_remains_time"
         case endTime = "end_time"
         case weeklyEndTime = "weekly_end_time"
+        case intervalBoostPermille = "interval_boost_permille"
+        case weeklyBoostPermille = "weekly_boost_permille"
     }
 }
