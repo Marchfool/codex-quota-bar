@@ -36,6 +36,8 @@ final class CodexTrafficLightController: ObservableObject {
     private var statusItem: NSStatusItem?
     private var timer: Timer?
     private var eventStream: FSEventStreamRef?
+    private var statusItemVisible = false
+    private var panelVisible = false
     private let scanQueue = DispatchQueue(label: "com.codexquotabar.trafficlight", qos: .utility)
     private var scanScheduled = false
     private var scanInProgress = false
@@ -49,32 +51,65 @@ final class CodexTrafficLightController: ObservableObject {
     private let fallbackScanInterval: TimeInterval = 10
 
     func start() {
-        guard statusItem == nil else { return }
-        let item = NSStatusBar.system.statusItem(withLength: 26)
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
-        item.menu = menu
-        statusItem = item
-        renderInitialIcon()
-
-        startFSEvents()
-        let timer = Timer(timeInterval: fallbackScanInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.scanNow()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-        scanNow()
+        setVisible(true)
     }
 
     func setVisible(_ visible: Bool) {
+        statusItemVisible = visible
         if visible {
-            if statusItem == nil { start() }
+            ensureStatusItem()
             statusItem?.isVisible = true
         } else {
             statusItem?.isVisible = false
         }
+        updateMonitoringState()
+    }
+
+    func setPanelVisible(_ visible: Bool) {
+        panelVisible = visible
+        updateMonitoringState()
+    }
+
+    private func ensureStatusItem() {
+        guard statusItem == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: 26)
+        statusMenuItem.isEnabled = false
+        if menu.items.isEmpty {
+            menu.addItem(statusMenuItem)
+        }
+        item.menu = menu
+        statusItem = item
+        renderInitialIcon()
+    }
+
+    private func updateMonitoringState() {
+        if statusItemVisible || panelVisible {
+            startMonitoring()
+        } else {
+            stopMonitoring()
+        }
+    }
+
+    private func startMonitoring() {
+        startFSEvents()
+        if timer == nil {
+            let timer = Timer(timeInterval: fallbackScanInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.scanNow()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+        scanNow()
+    }
+
+    private func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
+        stopFSEvents()
+        blinkWorkItems.forEach { $0.cancel() }
+        blinkWorkItems.removeAll()
     }
 
     /// Trigger a background scan and apply the result on the main actor.
@@ -192,6 +227,7 @@ final class CodexTrafficLightController: ObservableObject {
     }
 
     private func startFSEvents() {
+        guard eventStream == nil else { return }
         let path = (NSHomeDirectory() as NSString).appendingPathComponent(".codex/sessions")
         guard FileManager.default.fileExists(atPath: path) else { return }
         var ctx = FSEventStreamContext(version: 0,
@@ -206,6 +242,14 @@ final class CodexTrafficLightController: ObservableObject {
         FSEventStreamSetDispatchQueue(stream, scanQueue)
         FSEventStreamStart(stream)
         eventStream = stream
+    }
+
+    private func stopFSEvents() {
+        guard let stream = eventStream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        eventStream = nil
     }
 
     // MARK: - Inference (nonisolated: runs on the background scan queue)

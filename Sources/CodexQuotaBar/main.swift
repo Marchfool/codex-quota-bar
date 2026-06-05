@@ -121,7 +121,7 @@ private final class FullBleedHostingView<Content: View>: NSHostingView<Content> 
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var manager: QuotaManager!
     private var apiKeyManager: APIKeyManager!
@@ -176,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         manager.load()
         apiKeyManager.load()
+        publishWidgetSnapshot()
         migrateStoredProfiles()
         let startupImportDecision = evaluateStartupImport()
         startupImportReason = startupImportDecision.reason
@@ -196,17 +197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusItem?.button?.action = #selector(togglePopover)
         configureStatusButton()
 
-        // Always start data collection (the dropdown/widget cards need it even when the
-        // menu-bar items are hidden); the toggles only control status-item visibility.
-        memoryMonitor.start()
-        trafficLight.start()
-        // Claude has no reliable "generating" signal (Electron + opaque IndexedDB), so its
-        // activity watcher is left inert — the Claude card stays static. Only Codex has a work light.
         applyStatusBarVisibility()
 
         popover.behavior = .transient
         popover.animates = true
+        popover.delegate = self
         updatePopoverSize()
+        UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+        UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
 
         Task {
             isPerformingInitialLaunchRefresh = true
@@ -217,18 +215,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "CodexQuotaBar startup refresh completed claudeSafeStorageAccessed=%@",
                 String(didAccessClaudeSafeStorageDuringLaunch)
             )
-            WidgetCenter.shared.reloadAllTimelines()
+            reloadWidgetTimelines()
             updatePopoverSize()
             configureStatusButton()
             startUnifiedPolling()
         }
-        if UserDefaults.standard.bool(forKey: desktopWidgetRestoreOnLaunchKey) {
-            showDesktopWidget()
-        }
 
-        // Status-bar text shows reset countdowns in minutes; 15s refresh is plenty and avoids
-        // rebuilding the attributed title every few seconds.
-        Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        // Status-bar reset countdowns are minute-scale; avoid waking the app every few seconds.
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.configureStatusButton()
                 self?.updatePopoverSize()
@@ -344,7 +338,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             popover.contentViewController?.view.window?.isOpaque = false
             popover.contentViewController?.view.window?.backgroundColor = .clear
             popover.contentViewController?.view.window?.makeKey()
+            refreshActivityConsumers()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
+        popoverContentViewController = nil
+        refreshActivityConsumers()
     }
 
     private func installPopoverContentIfNeeded() {
@@ -376,7 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func refreshNow() {
         Task {
             await refreshEverything(quotaTrigger: .manual, apiTrigger: .manual)
-            WidgetCenter.shared.reloadAllTimelines()
+            reloadWidgetTimelines()
             updatePopoverSize()
             configureStatusButton()
         }
@@ -385,6 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func refreshAPIKeys() {
         Task {
             await apiKeyManager.refreshAll()
+            reloadWidgetTimelines()
             updatePopoverSize()
             configureStatusButton()
         }
@@ -418,6 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func applyStatusBarVisibility() {
         memoryMonitor.setVisible(UserDefaults.standard.object(forKey: "showMemoryIndicator") as? Bool ?? true)
         trafficLight.setVisible(UserDefaults.standard.object(forKey: "showCodexTrafficLight") as? Bool ?? true)
+        refreshActivityConsumers()
     }
 
     @objc private func showAPIKeys() {
@@ -447,10 +450,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func toggleDesktopWidget() {
         if let window = desktopWidgetWindow, window.isVisible {
-            saveDesktopWidgetFrame(window)
-            window.orderOut(nil)
+            hideAndReleaseDesktopWidget(window)
             UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
             UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
+            refreshActivityConsumers()
             return
         }
 
@@ -477,6 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             panel.minSize = DesktopWidgetFrameStore.minimumSize
             panel.delegate = self
+            panel.isReleasedWhenClosed = false
             panel.title = ""
             panel.titleVisibility = .hidden
             panel.titlebarAppearsTransparent = true
@@ -513,7 +517,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
-        UserDefaults.standard.set(true, forKey: desktopWidgetRestoreOnLaunchKey)
+        UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
+        refreshActivityConsumers()
+    }
+
+    private func hideAndReleaseDesktopWidget(_ window: NSWindow) {
+        saveDesktopWidgetFrame(window)
+        window.orderOut(nil)
+        window.contentView = nil
+        window.delegate = nil
+        desktopWidgetWindow = nil
+    }
+
+    private func refreshActivityConsumers() {
+        let panelVisible = popover.isShown || (desktopWidgetWindow?.isVisible ?? false)
+        memoryMonitor.setPanelVisible(panelVisible)
+        trafficLight.setPanelVisible(panelVisible)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -529,6 +548,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         saveDesktopWidgetFrame(from: notification)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === desktopWidgetWindow else { return }
+        hideAndReleaseDesktopWidget(window)
+        UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+        UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
+        refreshActivityConsumers()
     }
 
     private func hideDesktopWidgetWindowChrome(_ window: NSWindow) {
@@ -655,16 +682,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func startUnifiedPolling() {
         guard unifiedPollingTask == nil else { return }
         unifiedPollingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             while !Task.isCancelled {
-                let secondsUntilRefresh = max(0, self?.refreshCadence.nextRefreshAt.timeIntervalSinceNow ?? 0)
+                let secondsUntilRefresh = max(0, self.refreshCadence.nextRefreshAt.timeIntervalSinceNow)
                 if secondsUntilRefresh > 0 {
-                    let sleepSeconds = min(secondsUntilRefresh, 1)
-                    try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
+                    let milliseconds = Int64((secondsUntilRefresh * 1_000).rounded(.up))
+                    let tolerance: Duration = secondsUntilRefresh > 60 ? .seconds(15) : .seconds(1)
+                    try? await Task.sleep(for: .milliseconds(milliseconds), tolerance: tolerance)
                     continue
                 }
                 if Task.isCancelled { break }
-                await self?.refreshEverything(quotaTrigger: .polling, apiTrigger: .polling)
+                await self.refreshEverything(quotaTrigger: .polling, apiTrigger: .polling)
             }
+        }
+    }
+
+    private func reloadWidgetTimelines() {
+        publishWidgetSnapshot()
+        WidgetCenter.shared.reloadTimelines(ofKind: "CodexQuotaWidget")
+    }
+
+    private func publishWidgetSnapshot() {
+        let snapshot = WidgetQuotaSnapshotLoader.loadFromSourceFiles(
+            codexURL: FileSlotStore().fileURL,
+            apiURL: FileAPIKeyConfigStore().fileURL
+        )
+        do {
+            try WidgetQuotaSnapshotLoader.saveSharedSnapshot(snapshot)
+        } catch {
+            NSLog("CodexQuotaBar widget snapshot publish failed: %@", error.localizedDescription)
         }
     }
 
@@ -679,6 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         async let quotaRefresh: Void = manager.refreshAll(trigger: quotaTrigger)
         async let apiRefresh: Void = apiKeyManager.refreshAll(trigger: apiTrigger)
         _ = await (quotaRefresh, apiRefresh)
+        publishWidgetSnapshot()
     }
 
     private func migrateStoredProfiles() {
