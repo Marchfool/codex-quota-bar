@@ -33,6 +33,10 @@ public final class QuotaManager: ObservableObject {
         validSessionWindows.map(\.remainingPercent).min()
     }
 
+    public var weeklyRemaining: Int? {
+        validWeeklyWindows.map(\.remainingPercent).min()
+    }
+
     public var sessionResetAt: Date? {
         validSessionWindows.min { lhs, rhs in
             if lhs.remainingPercent == rhs.remainingPercent {
@@ -97,6 +101,15 @@ public final class QuotaManager: ObservableObject {
                 return nil
             }
             return snapshot.quotaWindows.first(where: { $0.kind == .session })
+        }
+    }
+
+    private var validWeeklyWindows: [QuotaWindow] {
+        slots.compactMap { slot -> QuotaWindow? in
+            guard let snapshot = slot.lastSnapshot, snapshot.fetchHealth != .authError, snapshot.status != .error else {
+                return nil
+            }
+            return snapshot.quotaWindows.first(where: { $0.kind == .weekly })
         }
     }
 

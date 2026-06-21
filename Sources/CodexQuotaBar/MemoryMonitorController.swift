@@ -40,7 +40,9 @@ final class MemoryMonitorController: ObservableObject {
     private var statusItem: NSStatusItem?
     private var timer: Timer?
     private var history: [MemoryPoint] = []
-    private let sampleInterval: TimeInterval = 1
+    private var statusItemVisible = false
+    private var panelVisible = false
+    private let sampleInterval: TimeInterval = 2
     private let historyWindow: TimeInterval = 60
     private let menu = NSMenu()
     private var breakdownItems: [String: NSMenuItem] = [:]
@@ -52,13 +54,44 @@ final class MemoryMonitorController: ObservableObject {
     ]
 
     func start() {
+        setVisible(true)
+    }
+
+    func setVisible(_ visible: Bool) {
+        statusItemVisible = visible
+        if visible {
+            ensureStatusItem()
+            statusItem?.isVisible = true
+        } else {
+            statusItem?.isVisible = false
+        }
+        updateSamplingState()
+    }
+
+    func setPanelVisible(_ visible: Bool) {
+        panelVisible = visible
+        updateSamplingState()
+    }
+
+    private func ensureStatusItem() {
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: 66)
         item.button?.imagePosition = .imageOnly
         buildMenu()
         item.menu = menu
         statusItem = item
+    }
 
+    private func updateSamplingState() {
+        if statusItemVisible || panelVisible {
+            startSampling()
+        } else {
+            stopSampling()
+        }
+    }
+
+    private func startSampling() {
+        guard timer == nil else { return }
         if let first = try? readSample() {
             let now = Date()
             history = (0..<historyCapacity).map { index in
@@ -79,13 +112,9 @@ final class MemoryMonitorController: ObservableObject {
         self.timer = timer
     }
 
-    func setVisible(_ visible: Bool) {
-        if visible {
-            if statusItem == nil { start() }
-            statusItem?.isVisible = true
-        } else {
-            statusItem?.isVisible = false
-        }
+    private func stopSampling() {
+        timer?.invalidate()
+        timer = nil
     }
 
     private func buildMenu() {

@@ -120,8 +120,180 @@ private final class FullBleedHostingView<Content: View>: NSHostingView<Content> 
     }
 }
 
+/// 状态栏图标一行的数据快照（主线程组装，绘制时只读）。
+private struct StatusBarRowSpec {
+    let label: String
+    let labelColor: NSColor
+    let fiveHour: Int?
+    let weekly: Int?
+}
+
+/// 状态栏图标渲染器：纯函数式，用 NSImage(size:flipped:drawingHandler:) 惰性绘制，
+/// 每块屏幕按自身倍率渲染（Retina 锐利）；动态色（labelColor）在绘制时按当前外观解析。
+private enum StatusBarIconRenderer {
+    private struct Layout {
+        let labelFont: NSFont
+        let numberFont: NSFont
+        let barWidth: CGFloat
+        let barHeight: CGFloat
+        let innerGap: CGFloat
+        let groupGap: CGFloat
+        let rowCenters: [CGFloat]
+        let textOffset: CGFloat
+        let dividerInset: CGFloat
+    }
+
+    /// 额度状态色（进度条填充）：<20 红、<50 黄、其余绿；无数据中性灰。
+    static func quotaColor(_ percent: Int?) -> NSColor {
+        guard let p = percent else { return NSColor(srgbRed: 0.55, green: 0.55, blue: 0.58, alpha: 1) }
+        if p < 20 { return NSColor(srgbRed: 0.96, green: 0.37, blue: 0.31, alpha: 1) }
+        if p < 50 { return NSColor(srgbRed: 0.98, green: 0.78, blue: 0.22, alpha: 1) }
+        return NSColor(srgbRed: 0.30, green: 0.85, blue: 0.47, alpha: 1)
+    }
+
+    static func numberText(_ percent: Int?) -> String {
+        percent.map { "\(min(100, max(0, $0)))%" } ?? "--"
+    }
+
+    /// 1-3 行自适应：每行 名字 + 5小时表 +（可选）每周表，各列定宽对齐。
+    static func render(rows: [StatusBarRowSpec], showsWeekly: Bool, height h: CGFloat) -> NSImage {
+        let layout = layout(rowCount: rows.count, height: h)
+        let labelColW = rows
+            .map { ($0.label as NSString).size(withAttributes: [.font: layout.labelFont]).width }
+            .max() ?? 0
+        let numberColW = ("100%" as NSString).size(withAttributes: [.font: layout.numberFont]).width
+        let bar1X = labelColW + layout.innerGap
+        let num1X = bar1X + layout.barWidth + layout.innerGap
+        let bar2X = num1X + numberColW + layout.groupGap
+        let num2X = bar2X + layout.barWidth + layout.innerGap
+        let total = showsWeekly ? num2X + numberColW : num1X + numberColW
+
+        return NSImage(size: NSSize(width: total, height: h), flipped: false) { _ in
+            if showsWeekly {
+                // 组间细分隔线（贯穿两行，标记 5小时组 / 每周组 的边界）
+                NSColor.labelColor.withAlphaComponent(0.22).setFill()
+                NSRect(
+                    x: num1X + numberColW + layout.groupGap / 2,
+                    y: layout.dividerInset,
+                    width: 0.8,
+                    height: h - layout.dividerInset * 2
+                ).fill()
+            }
+            for (row, cy) in zip(rows, layout.rowCenters) {
+                drawRow(
+                    row,
+                    layout: layout,
+                    cy: cy,
+                    bar1X: bar1X,
+                    num1X: num1X,
+                    bar2X: bar2X,
+                    num2X: num2X,
+                    numberColW: numberColW,
+                    showsWeekly: showsWeekly
+                )
+            }
+            return true
+        }
+    }
+
+    private static func layout(rowCount: Int, height h: CGFloat) -> Layout {
+        if rowCount <= 1 {
+            let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+            return Layout(
+                labelFont: labelFont,
+                numberFont: .monospacedDigitSystemFont(ofSize: 9, weight: .semibold),
+                barWidth: 32,
+                barHeight: 4.2,
+                innerGap: 4,
+                groupGap: 8,
+                rowCenters: [h * 0.50],
+                textOffset: labelFont.pointSize * 0.55,
+                dividerInset: 4
+            )
+        }
+        if rowCount == 2 {
+            let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold)
+            return Layout(
+                labelFont: labelFont,
+                numberFont: .monospacedDigitSystemFont(ofSize: 8.5, weight: .semibold),
+                barWidth: 30,
+                barHeight: 4,
+                innerGap: 4,
+                groupGap: 8,
+                rowCenters: [h * 0.72, h * 0.28],
+                textOffset: 4.5,
+                dividerInset: 3
+            )
+        }
+
+        let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 6.8, weight: .bold)
+        return Layout(
+            labelFont: labelFont,
+            numberFont: .monospacedDigitSystemFont(ofSize: 6.8, weight: .semibold),
+            barWidth: 24,
+            barHeight: 3,
+            innerGap: 3,
+            groupGap: 6,
+            rowCenters: [h * 0.80, h * 0.50, h * 0.20],
+            textOffset: labelFont.pointSize * 0.55,
+            dividerInset: 2
+        )
+    }
+
+    private static func drawRow(_ row: StatusBarRowSpec, layout: Layout, cy: CGFloat,
+                                bar1X: CGFloat, num1X: CGFloat, bar2X: CGFloat, num2X: CGFloat,
+                                numberColW: CGFloat, showsWeekly: Bool) {
+        // 名字（左对齐 x=0，品牌/任务色）
+        let la: [NSAttributedString.Key: Any] = [.font: layout.labelFont, .foregroundColor: row.labelColor]
+        (row.label as NSString).draw(at: NSPoint(x: 0, y: cy - layout.textOffset), withAttributes: la)
+
+        drawMeter(cy: cy, layout: layout, barX: bar1X, numX: num1X, numberColW: numberColW, percent: row.fiveHour)
+        if showsWeekly {
+            drawMeter(cy: cy, layout: layout, barX: bar2X, numX: num2X, numberColW: numberColW, percent: row.weekly)
+        }
+    }
+
+    /// 单条进度表：胶囊轨道 + 填充（长度=剩余量、颜色=额度状态色）+ 右对齐百分比。
+    /// 数字默认中性色（颜色信息由进度条承担），仅剩余 <20% 时变红警示。
+    private static func drawMeter(cy: CGFloat, layout: Layout, barX: CGFloat, numX: CGFloat,
+                                  numberColW: CGFloat, percent: Int?) {
+        let barY = cy - layout.barHeight / 2
+
+        NSColor.labelColor.withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: NSRect(x: barX, y: barY, width: layout.barWidth, height: layout.barHeight),
+                     xRadius: layout.barHeight / 2, yRadius: layout.barHeight / 2).fill()
+
+        if let p = percent {
+            let frac = CGFloat(min(100, max(0, p))) / 100
+            if frac > 0 {
+                quotaColor(p).setFill()
+                NSBezierPath(
+                    roundedRect: NSRect(
+                        x: barX,
+                        y: barY,
+                        width: max(layout.barHeight, layout.barWidth * frac),
+                        height: layout.barHeight
+                    ),
+                    xRadius: layout.barHeight / 2,
+                    yRadius: layout.barHeight / 2
+                ).fill()
+            }
+        }
+
+        let numColor: NSColor = if let p = percent {
+            p < 20 ? quotaColor(p) : NSColor.labelColor.withAlphaComponent(0.85)
+        } else {
+            NSColor.labelColor.withAlphaComponent(0.45)
+        }
+        let na: [NSAttributedString.Key: Any] = [.font: layout.numberFont, .foregroundColor: numColor]
+        let ns = numberText(percent) as NSString
+        let nw = ns.size(withAttributes: na).width
+        ns.draw(at: NSPoint(x: numX + numberColW - nw, y: cy - layout.textOffset), withAttributes: na)
+    }
+}
+
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var manager: QuotaManager!
     private var apiKeyManager: APIKeyManager!
@@ -131,10 +303,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var apiKeysWindow: NSWindow?
     private var desktopWidgetWindow: NSPanel?
     private let popover = NSPopover()
-    private let claudeWebFetcher = ClaudeWebFetcher()
+    private var popoverContentViewController: NSViewController?
+    private var claudeWebFetcher: ClaudeWebFetcher?
     private let memoryMonitor = MemoryMonitorController()
     private let trafficLight = CodexTrafficLightController()
     private let claudeActivity = ClaudeActivityController()
+    /// 仅在 Codex 执行任务(running)时运行的呼吸定时器；任务结束立即停，空闲零开销。
+    private var statusBreathTimer: Timer?
     private var didPerformStartupImport = false
     private var startupImportReason = "not_evaluated"
     private var didAccessClaudeSafeStorageDuringLaunch = false
@@ -143,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isRunningUnifiedRefresh = false
     private let keychainSecurityACLVersion = 3
     private let keychainSecurityACLVersionKey = "keychainSecurityACLVersion"
+    private let desktopWidgetRestoreOnLaunchKey = "desktopWidgetRestoreOnLaunch"
     private let refreshCadence = RefreshCadence(
         intervalSeconds: StartupRefreshPolicy.unifiedRefreshIntervalSeconds,
         initialDelaySeconds: StartupRefreshPolicy.initialRefreshDelaySeconds
@@ -168,16 +344,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             importer: CodexAuthImporter(secretStore: secretStore, profileStore: profileStore)
         )
         apiKeyManager = APIKeyManager(store: FileAPIKeyConfigStore(), secretStore: secretStore)
-        claudeWebFetcher.onSafeStorageAccessAttempt = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.handleClaudeSafeStorageAccessAttempt()
-            }
-        }
-        apiKeyManager.claudeFetcher = { [claudeWebFetcher] allowsUserInteraction in
-            try await claudeWebFetcher.fetchOrganizations(allowsUserInteraction: allowsUserInteraction)
+        apiKeyManager.claudeFetcher = { [weak self] allowsUserInteraction in
+            guard let self else { throw ClaudeFetchError.webFetchFailed("应用已退出") }
+            return try await self.fetchClaudeOrganizations(allowsUserInteraction: allowsUserInteraction)
         }
         manager.load()
         apiKeyManager.load()
+        publishWidgetSnapshot()
         migrateStoredProfiles()
         let startupImportDecision = evaluateStartupImport()
         startupImportReason = startupImportDecision.reason
@@ -196,40 +369,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.target = self
         statusItem?.button?.action = #selector(togglePopover)
+        CompactStatusBarDefaults.applyCompactMigration()
         configureStatusButton()
 
-        // Always start data collection (the dropdown/widget cards need it even when the
-        // menu-bar items are hidden); the toggles only control status-item visibility.
-        memoryMonitor.start()
-        trafficLight.start()
-        // Claude has no reliable "generating" signal (Electron + opaque IndexedDB), so its
-        // activity watcher is left inert — the Claude card stays static. Only Codex has a work light.
+        // 深/浅色菜单栏切换时重绘图标（数字/轨道用语义色，需跟随外观）。
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.configureStatusButton() }
+        }
+
+        // Codex 红绿灯内嵌进主图标：常驻监听任务状态，状态一变就重绘并按需启停呼吸。
+        trafficLight.onModeChange = { [weak self] in self?.statusModeDidChange() }
+        trafficLight.setEmbeddedActive(true)
+
         applyStatusBarVisibility()
 
         popover.behavior = .transient
         popover.animates = true
+        popover.delegate = self
         updatePopoverSize()
-        let hostingController = NSHostingController(
-            rootView: MonitorPanelView(
-                manager: manager,
-                apiKeyManager: apiKeyManager,
-                refreshCadence: refreshCadence,
-                memoryMonitor: memoryMonitor,
-                trafficLight: trafficLight,
-                claudeActivity: claudeActivity,
-                refresh: { [weak self] in self?.refreshNow() },
-                importAccount: { [weak self] in self?.importAccount() },
-                showAccounts: { [weak self] in self?.showAccounts() },
-                showAPIKeys: { [weak self] in self?.showAPIKeys() },
-                refreshAPIKeys: { [weak self] in self?.refreshAPIKeys() },
-                toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
-                openDataFolder: { [weak self] in self?.openLogs() },
-                quit: { [weak self] in self?.quit() }
-            )
-        )
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
-        popover.contentViewController = hostingController
+        UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+        UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
 
         Task {
             isPerformingInitialLaunchRefresh = true
@@ -240,14 +402,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "CodexQuotaBar startup refresh completed claudeSafeStorageAccessed=%@",
                 String(didAccessClaudeSafeStorageDuringLaunch)
             )
-            WidgetCenter.shared.reloadAllTimelines()
+            reloadWidgetTimelines()
             updatePopoverSize()
             configureStatusButton()
             startUnifiedPolling()
         }
-        showDesktopWidget()
 
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        // Status-bar reset countdowns are minute-scale; avoid waking the app every few seconds.
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.configureStatusButton()
                 self?.updatePopoverSize()
@@ -256,11 +418,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func updatePopoverSize() {
+        let routineTotal = Int(apiKeyManager.providers.first(where: { $0.id == .claude })?
+            .lastSnapshot?.extras["routineTotal"] ?? "") ?? 0
         popover.contentSize = NSSize(
-            width: PanelMetrics.width,
-            height: PanelMetrics.height(
-                codexSlotCount: manager.slots.count,
-                apiProviderCount: apiKeyManager.providers.count,
+            width: PanelMetrics.menuWidth,
+            height: PanelMetrics.menuHeight(
+                codexRowCounts: manager.slots.map { max(1, $0.lastSnapshot?.quotaWindows.count ?? 0) },
+                claudeRows: 2 + (routineTotal > 0 ? 1 : 0),
+                hasMiniMax: apiKeyManager.providers.contains(where: { $0.id == .minimax }),
+                balanceRows: [APIKeyProviderID.deepseek, .comfly]
+                    .filter { id in apiKeyManager.providers.contains(where: { $0.id == id }) }.count,
                 hasError: manager.lastError != nil
             )
         )
@@ -268,71 +435,183 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func configureStatusButton() {
         guard let button = statusItem?.button else { return }
-        button.image = nil
         button.contentTintColor = nil
-        button.attributedTitle = makeStatusBarTitle()
+        let toolTip = makeStatusBarToolTip()
+        let image = makeStatusBarImage()
+        image.accessibilityDescription = toolTip
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.toolTip = toolTip
+        button.setAccessibilityLabel(toolTip)
     }
 
-    private func makeStatusBarTitle() -> NSAttributedString {
-        let title = NSMutableAttributedString()
-        let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
-        ]
-        let separatorAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
-        let dotAttributes: (NSColor) -> [NSAttributedString.Key: Any] = { color in
-            [
-                .font: NSFont.systemFont(ofSize: 8.5, weight: .bold),
-                .foregroundColor: color,
-                .baselineOffset: 0.5
-            ]
+    // MARK: - 状态栏图标（上下两行，整行随任务态变色）
+
+    // 默认/空闲用各自品牌色；执行中→黄、报错→红、任务结束→回品牌色。
+    private static let codexBrandColor = NSColor(srgbRed: 0.30, green: 0.72, blue: 0.88, alpha: 1)   // Codex 青
+    private static let claudeBrandColor = NSColor(srgbRed: 0.93, green: 0.46, blue: 0.30, alpha: 1)  // Claude 橙
+    private static let minimaxBrandColor = NSColor(srgbRed: 0.49, green: 0.23, blue: 0.93, alpha: 1) // MiniMax 紫
+    private static let statusBusyColor = NSColor(srgbRed: 0.95, green: 0.78, blue: 0.22, alpha: 1)   // 执行中 黄
+    private static let statusErrorColor = NSColor(srgbRed: 0.95, green: 0.37, blue: 0.31, alpha: 1)  // 报错 红
+
+    /// Codex 名字颜色：默认品牌色，执行中→黄（带呼吸明暗），报错→红，结束→回品牌色。
+    private func codexLabelColor(breathAlpha: CGFloat) -> NSColor {
+        switch trafficLight.mode {
+        case .running: return Self.statusBusyColor.withAlphaComponent(breathAlpha)
+        case .failure: return Self.statusErrorColor
+        case .idle, .success: return Self.codexBrandColor
         }
-
-        title.append(NSAttributedString(
-            string: "●",
-            attributes: dotAttributes(NSColor(calibratedRed: 0.07, green: 0.66, blue: 0.78, alpha: 1.0))
-        ))
-        title.append(NSAttributedString(
-            string: " \(statusBarPlatformText(name: "Codex", percent: manager.sessionRemaining, resetAt: manager.sessionResetAt))",
-            attributes: textAttributes
-        ))
-        title.append(NSAttributedString(string: " | ", attributes: separatorAttributes))
-        title.append(NSAttributedString(
-            string: "●",
-            attributes: dotAttributes(NSColor(calibratedRed: 0.88, green: 0.35, blue: 0.17, alpha: 1.0))
-        ))
-        title.append(NSAttributedString(
-            string: " \(statusBarPlatformText(name: "Claude", percent: apiKeyManager.claudeFiveHourRemaining, resetAt: apiKeyManager.claudeFiveHourResetAt))",
-            attributes: textAttributes
-        ))
-        return title
     }
 
-    private func statusBarPlatformText(name: String, percent: Int?, resetAt: Date?) -> String {
-        "\(name) \(statusBarPercentText(percent)) \(statusBarRemainingText(resetAt))"
+    /// 呼吸明暗系数（0.45~1.0，周期 ~1.8s），由连续时间驱动，免受定时器抖动影响。
+    private static func statusBreathAlpha(at date: Date) -> CGFloat {
+        let phase = sin(date.timeIntervalSinceReferenceDate * 2 * .pi / 1.8)
+        return 0.45 + 0.55 * (0.5 + 0.5 * phase)
     }
 
-    private func statusBarPercentText(_ percent: Int?) -> String {
-        guard let percent else { return "--" }
-        return "\(min(100, max(0, percent)))%"
+    /// 红绿灯任务态变化时调用：running 期间启动 ~10fps 呼吸定时器，其余状态停掉（空闲零开销）。
+    private func statusModeDidChange() {
+        if trafficLight.mode == .running {
+            if statusBreathTimer == nil {
+                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                    Task { @MainActor in self?.configureStatusButton() }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                statusBreathTimer = timer
+            }
+        } else {
+            statusBreathTimer?.invalidate()
+            statusBreathTimer = nil
+        }
+        configureStatusButton()
+    }
+
+
+    // 布局常量
+
+    /// 组装状态栏图标：主线程取数据快照，交给 StatusBarIconRenderer 用 drawingHandler 惰性绘制
+    /// （每块屏幕按自身倍率渲染，Retina/外接屏都锐利；labelColor 等动态色在绘制时按当前外观解析）。
+    private func makeStatusBarImage() -> NSImage {
+        // running 时按连续时间取呼吸明暗；其余状态不透明（且无定时器）。
+        let breathAlpha: CGFloat = trafficLight.mode == .running ? Self.statusBreathAlpha(at: Date()) : 1
+        let rows = statusBarRows(breathAlpha: breathAlpha)
+        let showsWeekly = UserDefaults.standard.object(forKey: "statusBarShowsWeekly") as? Bool ?? true
+        return StatusBarIconRenderer.render(rows: rows, showsWeekly: showsWeekly,
+                                            height: NSStatusBar.system.thickness)
+    }
+
+    private func statusBarRows(breathAlpha: CGFloat) -> [StatusBarRowSpec] {
+        CompactStatusBarDefaults.visibleQuotaProviders().map { provider in
+            switch provider {
+            case .codex:
+                // Codex：名字接红绿灯任务态（默认品牌青/执行黄+呼吸/报错红）
+                return StatusBarRowSpec(
+                    label: "Codex",
+                    labelColor: codexLabelColor(breathAlpha: breathAlpha),
+                    fiveHour: manager.sessionRemaining,
+                    weekly: manager.weeklyRemaining
+                )
+            case .claude:
+                // Claude：名字固定品牌橙（无可靠任务信号）
+                return StatusBarRowSpec(
+                    label: "Claude",
+                    labelColor: Self.claudeBrandColor,
+                    fiveHour: apiKeyManager.claudeFiveHourRemaining,
+                    weekly: apiKeyManager.claudeSevenDayRemaining
+                )
+            case .minimax:
+                return StatusBarRowSpec(
+                    label: "MiniMax",
+                    labelColor: Self.minimaxBrandColor,
+                    fiveHour: minimaxRemaining(
+                        remainingKey: "intervalRemainingPercent",
+                        totalKey: "intervalQuotaTotalPercent",
+                        usedKey: "intervalQuotaUsedPercent"
+                    ),
+                    weekly: minimaxRemaining(
+                        remainingKey: "weeklyRemainingPercent",
+                        totalKey: "weeklyQuotaTotalPercent",
+                        usedKey: "weeklyQuotaUsedPercent"
+                    )
+                )
+            }
+        }
+    }
+
+    private func makeStatusBarToolTip() -> String {
+        CompactStatusBarDefaults.visibleQuotaProviders().map { provider in
+            switch provider {
+            case .codex:
+                return statusBarPlatformText(
+                    name: "Codex",
+                    fiveHour: manager.sessionRemaining,
+                    weekly: manager.weeklyRemaining,
+                    resetAt: manager.sessionResetAt
+                )
+            case .claude:
+                return statusBarPlatformText(
+                    name: "Claude",
+                    fiveHour: apiKeyManager.claudeFiveHourRemaining,
+                    weekly: apiKeyManager.claudeSevenDayRemaining,
+                    resetAt: apiKeyManager.claudeFiveHourResetAt
+                )
+            case .minimax:
+                return statusBarPlatformText(
+                    name: "MiniMax",
+                    fiveHour: minimaxRemaining(
+                        remainingKey: "intervalRemainingPercent",
+                        totalKey: "intervalQuotaTotalPercent",
+                        usedKey: "intervalQuotaUsedPercent"
+                    ),
+                    weekly: minimaxRemaining(
+                        remainingKey: "weeklyRemainingPercent",
+                        totalKey: "weeklyQuotaTotalPercent",
+                        usedKey: "weeklyQuotaUsedPercent"
+                    ),
+                    resetAt: minimaxResetAt(key: "intervalResetAt")
+                )
+            }
+        }.joined(separator: "\n")
+    }
+
+    private func statusBarPlatformText(name: String, fiveHour: Int?, weekly: Int?, resetAt: Date?) -> String {
+        "\(name)  5小时 \(CompactStatusBarDisplay.percentText(fiveHour)) · 每周 \(CompactStatusBarDisplay.percentText(weekly)) · \(statusBarRemainingText(resetAt))"
+    }
+
+    private func minimaxRemaining(remainingKey: String, totalKey: String, usedKey: String) -> Int? {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else {
+            return nil
+        }
+        return MiniMaxQuotaDisplay.window(
+            extras: snapshot.extras,
+            remainingKey: remainingKey,
+            totalKey: totalKey,
+            usedKey: usedKey,
+            fallbackUsedPercent: snapshot.usedPercent
+        ).barPercent
+    }
+
+    private func minimaxResetAt(key: String) -> Date? {
+        guard let iso = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot?.extras[key] else {
+            return nil
+        }
+        return DateCoding.parseISO8601(iso)
     }
 
     private func statusBarRemainingText(_ date: Date?) -> String {
-        guard let date else { return "--" }
+        guard let date else { return "重置 --" }
         let remaining = max(0, Int(date.timeIntervalSinceNow))
+        let prefix = "重置 "
         if remaining < 60 {
-            return "\(remaining)s"
+            return "\(prefix)\(remaining)s"
         }
 
         let hours = remaining / 3_600
         let minutes = (remaining % 3_600) / 60
         if hours > 0 {
-            return minutes > 0 ? "\(hours)h\(minutes)m" : "\(hours)h"
+            return minutes > 0 ? "\(prefix)\(hours)h\(minutes)m" : "\(prefix)\(hours)h"
         }
-        return "\(minutes)m"
+        return "\(prefix)\(minutes)m"
     }
 
     private func makeStatusIcon(isWarning: Bool) -> NSImage {
@@ -357,18 +636,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            installPopoverContentIfNeeded()
             updatePopoverSize()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.isOpaque = false
             popover.contentViewController?.view.window?.backgroundColor = .clear
             popover.contentViewController?.view.window?.makeKey()
+            refreshActivityConsumers()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
+        popoverContentViewController = nil
+        refreshActivityConsumers()
+    }
+
+    private func installPopoverContentIfNeeded() {
+        guard popover.contentViewController == nil else { return }
+        let hostingController = NSHostingController(
+            rootView: MonitorPanelView(
+                manager: manager,
+                apiKeyManager: apiKeyManager,
+                refreshCadence: refreshCadence,
+                memoryMonitor: memoryMonitor,
+                trafficLight: trafficLight,
+                claudeActivity: claudeActivity,
+                refresh: { [weak self] in self?.refreshNow() },
+                importAccount: { [weak self] in self?.importAccount() },
+                showAccounts: { [weak self] in self?.showAccounts() },
+                showAPIKeys: { [weak self] in self?.showAPIKeys() },
+                refreshAPIKeys: { [weak self] in self?.refreshAPIKeys() },
+                toggleDesktopWidget: { [weak self] in self?.toggleDesktopWidget() },
+                openDataFolder: { [weak self] in self?.openLogs() },
+                quit: { [weak self] in self?.quit() }
+            )
+        )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        popover.contentViewController = hostingController
+        popoverContentViewController = hostingController
     }
 
     @objc private func refreshNow() {
         Task {
             await refreshEverything(quotaTrigger: .manual, apiTrigger: .manual)
-            WidgetCenter.shared.reloadAllTimelines()
+            reloadWidgetTimelines()
             updatePopoverSize()
             configureStatusButton()
         }
@@ -377,6 +690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func refreshAPIKeys() {
         Task {
             await apiKeyManager.refreshAll()
+            reloadWidgetTimelines()
             updatePopoverSize()
             configureStatusButton()
         }
@@ -408,8 +722,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func applyStatusBarVisibility() {
-        memoryMonitor.setVisible(UserDefaults.standard.object(forKey: "showMemoryIndicator") as? Bool ?? true)
-        trafficLight.setVisible(UserDefaults.standard.object(forKey: "showCodexTrafficLight") as? Bool ?? true)
+        memoryMonitor.setVisible(CompactStatusBarDefaults.isMemoryIndicatorVisible())
+        trafficLight.setVisible(CompactStatusBarDefaults.isTrafficLightVisible())
+        refreshActivityConsumers()
+        configureStatusButton()   // “每周进度”开关切换后立即重绘主图标
     }
 
     @objc private func showAPIKeys() {
@@ -439,9 +755,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func toggleDesktopWidget() {
         if let window = desktopWidgetWindow, window.isVisible {
-            saveDesktopWidgetFrame(window)
-            window.orderOut(nil)
+            hideAndReleaseDesktopWidget(window)
             UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+            UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
+            refreshActivityConsumers()
             return
         }
 
@@ -468,6 +785,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             panel.minSize = DesktopWidgetFrameStore.minimumSize
             panel.delegate = self
+            panel.isReleasedWhenClosed = false
             panel.title = ""
             panel.titleVisibility = .hidden
             panel.titlebarAppearsTransparent = true
@@ -504,6 +822,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         desktopWidgetWindow?.orderFrontRegardless()
         UserDefaults.standard.set(true, forKey: "desktopWidgetVisible")
+        UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
+        refreshActivityConsumers()
+    }
+
+    private func hideAndReleaseDesktopWidget(_ window: NSWindow) {
+        saveDesktopWidgetFrame(window)
+        window.orderOut(nil)
+        window.contentView = nil
+        window.delegate = nil
+        desktopWidgetWindow = nil
+    }
+
+    private func refreshActivityConsumers() {
+        let panelVisible = popover.isShown || (desktopWidgetWindow?.isVisible ?? false)
+        memoryMonitor.setPanelVisible(panelVisible)
+        trafficLight.setPanelVisible(panelVisible)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -519,6 +853,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         saveDesktopWidgetFrame(from: notification)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === desktopWidgetWindow else { return }
+        hideAndReleaseDesktopWidget(window)
+        UserDefaults.standard.set(false, forKey: "desktopWidgetVisible")
+        UserDefaults.standard.set(false, forKey: desktopWidgetRestoreOnLaunchKey)
+        refreshActivityConsumers()
     }
 
     private func hideDesktopWidgetWindowChrome(_ window: NSWindow) {
@@ -626,19 +968,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    private func fetchClaudeOrganizations(allowsUserInteraction: Bool) async throws -> APIBalanceSnapshot {
+        if claudeWebFetcher == nil {
+            let fetcher = ClaudeWebFetcher()
+            fetcher.onSafeStorageAccessAttempt = { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.handleClaudeSafeStorageAccessAttempt()
+                }
+            }
+            claudeWebFetcher = fetcher
+        }
+        guard let claudeWebFetcher else {
+            throw ClaudeFetchError.webFetchFailed("Claude 同步器未初始化")
+        }
+        return try await claudeWebFetcher.fetchOrganizations(allowsUserInteraction: allowsUserInteraction)
+    }
+
     private func startUnifiedPolling() {
         guard unifiedPollingTask == nil else { return }
         unifiedPollingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             while !Task.isCancelled {
-                let secondsUntilRefresh = max(0, self?.refreshCadence.nextRefreshAt.timeIntervalSinceNow ?? 0)
+                let secondsUntilRefresh = max(0, self.refreshCadence.nextRefreshAt.timeIntervalSinceNow)
                 if secondsUntilRefresh > 0 {
-                    let sleepSeconds = min(secondsUntilRefresh, 1)
-                    try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
+                    let milliseconds = Int64((secondsUntilRefresh * 1_000).rounded(.up))
+                    let tolerance: Duration = secondsUntilRefresh > 60 ? .seconds(15) : .seconds(1)
+                    try? await Task.sleep(for: .milliseconds(milliseconds), tolerance: tolerance)
                     continue
                 }
                 if Task.isCancelled { break }
-                await self?.refreshEverything(quotaTrigger: .polling, apiTrigger: .polling)
+                await self.refreshEverything(quotaTrigger: .polling, apiTrigger: .polling)
             }
+        }
+    }
+
+    private func reloadWidgetTimelines() {
+        publishWidgetSnapshot()
+        WidgetCenter.shared.reloadTimelines(ofKind: "CodexQuotaWidget")
+    }
+
+    private func publishWidgetSnapshot() {
+        let snapshot = WidgetQuotaSnapshotLoader.loadFromSourceFiles(
+            codexURL: FileSlotStore().fileURL,
+            apiURL: FileAPIKeyConfigStore().fileURL
+        )
+        do {
+            try WidgetQuotaSnapshotLoader.saveSharedSnapshot(snapshot)
+        } catch {
+            NSLog("CodexQuotaBar widget snapshot publish failed: %@", error.localizedDescription)
         }
     }
 
@@ -653,6 +1030,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         async let quotaRefresh: Void = manager.refreshAll(trigger: quotaTrigger)
         async let apiRefresh: Void = apiKeyManager.refreshAll(trigger: apiTrigger)
         _ = await (quotaRefresh, apiRefresh)
+        publishWidgetSnapshot()
     }
 
     private func migrateStoredProfiles() {
@@ -692,155 +1070,301 @@ private struct MonitorPanelView: View {
     let toggleDesktopWidget: () -> Void
     let openDataFolder: () -> Void
     let quit: () -> Void
-    @State private var copiedProviderID: APIKeyProviderID?
-    @State private var copyFeedbackToken = 0
+    private static let updatedAtFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
 
     private var panelHeight: CGFloat {
-        PanelMetrics.height(
-            codexSlotCount: manager.slots.count,
-            apiProviderCount: apiKeyManager.providers.count,
+        PanelMetrics.menuHeight(
+            codexRowCounts: manager.slots.map { max(1, $0.lastSnapshot?.quotaWindows.count ?? 0) },
+            claudeRows: 2 + (claudeRoutine != nil ? 1 : 0),
+            hasMiniMax: apiProvider(.minimax) != nil,
+            balanceRows: (apiProvider(.deepseek) != nil ? 1 : 0) + (apiProvider(.comfly) != nil ? 1 : 0),
             hasError: manager.lastError != nil
         )
     }
 
+    // 原生菜单风：纯平面、无渐变/光晕/倒计时圆环、无 TimelineView——只随 @Published 数据变化重绘。
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { _ in
-            ZStack {
-                VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
-                ZStack {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.05, green: 0.05, blue: 0.08).opacity(0.96),
-                            Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.98)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.03, green: 0.64, blue: 0.76).opacity(0.20),
-                            .clear
-                        ],
-                        center: .topLeading,
-                        startRadius: 24,
-                        endRadius: 260
-                    )
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.87, green: 0.34, blue: 0.14).opacity(0.14),
-                            .clear
-                        ],
-                        center: .topTrailing,
-                        startRadius: 18,
-                        endRadius: 220
-                    )
-                }
+        VStack(spacing: 0) {
+            menuHeader
+            Rectangle().fill(Color.white.opacity(0.10)).frame(height: 0.5)
 
-                VStack(spacing: 0) {
-                    header
-
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(spacing: 8) {
-                            if let lastError = manager.lastError {
-                                MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
-                            }
-
-                            SubscriptionCardStack(
-                                manager: manager,
-                                apiKeyManager: apiKeyManager,
-                                refreshCadence: refreshCadence,
-                                memoryMonitor: memoryMonitor,
-                                trafficLight: trafficLight,
-                                claudeActivity: claudeActivity,
-                                importAccount: importAccount
-                            )
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 12)
-                        .padding(.bottom, 8)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let lastError = manager.lastError {
+                        MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
+                            .padding(.bottom, 4)
                     }
-                    .frame(maxHeight: PanelMetrics.scrollHeight(for: panelHeight))
-
-                    copyRow
-                    actionBar
+                    codexSections
+                    sectionDivider
+                    claudeSection
+                    minimaxSection
+                    if let provider = apiProvider(.deepseek) {
+                        sectionDivider
+                        balanceRow(provider)
+                    }
+                    if let provider = apiProvider(.comfly) {
+                        sectionDivider
+                        balanceRow(provider)
+                    }
+                    sectionDivider
+                    memoryRow
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
+
+            Rectangle().fill(Color.white.opacity(0.10)).frame(height: 0.5)
+            actionBar
         }
-        .frame(width: PanelMetrics.width, height: panelHeight)
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(Color.white.opacity(0.10), lineWidth: 0.8)
-        )
-        .shadow(color: .black.opacity(0.42), radius: 18, y: 10)
+        .frame(width: PanelMetrics.menuWidth, height: panelHeight)
+        .background(Color(red: 0.114, green: 0.114, blue: 0.125))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .preferredColorScheme(.dark)
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            MonitorHeaderIcon()
-                .scaleEffect(0.88)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("订阅余额")
-                    .font(.custom("Avenir Next Demi Bold", size: 15))
-                    .tracking(0.2)
-                    .foregroundStyle(.white)
-                Text(statusSubtitle)
-                    .font(.custom("Avenir Next Regular", size: 9.5))
-                    .foregroundStyle(.white.opacity(0.48))
-                BuildIdentityView(compact: true)
-            }
-
+    private var menuHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("订阅余额")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.94))
             Spacer(minLength: 0)
+            Text(updatedAtText)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.42))
         }
         .padding(.horizontal, 14)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
+        .padding(.vertical, 9)
     }
 
-    private var statusSubtitle: String {
-        if manager.isRefreshing || apiKeyManager.isRefreshing { return "正在刷新..." }
-        if manager.slots.isEmpty { return "尚未导入账号" }
-        return "5小时与周额度实时监控"
+    private var updatedAtText: String {
+        if manager.isRefreshing || apiKeyManager.isRefreshing { return "刷新中…" }
+        let dates = manager.slots.compactMap { $0.lastSnapshot?.updatedAt }
+            + apiKeyManager.providers.compactMap { $0.lastSnapshot?.updatedAt }
+        guard let latest = dates.max() else { return "尚未刷新" }
+        return "更新于 \(Self.updatedAtFormatter.string(from: latest))"
     }
 
-    private var copyRow: some View {
+    private var sectionDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.07))
+            .frame(height: 0.5)
+            .padding(.vertical, 6)
+    }
+
+    /// 区头：名字（品牌色）+ 套餐（左侧小字）+ 任务状态；右侧一条聚合说明（重置时间等），
+    /// 行内不再带说明文字——降噪的关键。
+    @ViewBuilder
+    private func sectionHeader(name: String, color: Color, plan: String?,
+                               detail: String? = nil, status: (label: String, color: Color)? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(name)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(color)
+            if let plan, !plan.isEmpty {
+                Text(plan)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .lineLimit(1)
+            }
+            if let status {
+                Text("● \(status.label)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(status.color)
+            }
+            Spacer(minLength: 0)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.white.opacity(0.38))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+        .padding(.bottom, 3)
+    }
+
+    @ViewBuilder
+    private var codexSections: some View {
+        if manager.slots.isEmpty {
+            HStack {
+                Text("尚未导入 Codex 账号")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+                Spacer(minLength: 0)
+                Button("导入", action: importAccount)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+            }
+            .frame(height: 24)
+        } else {
+            ForEach(Array(manager.slots.enumerated()), id: \.element.id) { index, slot in
+                if index > 0 { sectionDivider }
+                codexSection(slot)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func codexSection(_ slot: AccountSlot) -> some View {
+        let taskStatus: (label: String, color: Color)? = switch trafficLight.mode {
+        case .running: ("执行中", Color(nsColor: trafficLight.mode.color))
+        case .failure: ("异常", Color(nsColor: trafficLight.mode.color))
+        case .idle, .success: nil
+        }
+        sectionHeader(name: "Codex", color: Color(red: 0.30, green: 0.72, blue: 0.88),
+                      plan: slot.lastSnapshot?.extras["planType"].map(displayPlanName),
+                      detail: codexResetSummary(slot),
+                      status: taskStatus)
+        if let snap = slot.lastSnapshot, !snap.quotaWindows.isEmpty {
+            ForEach(snap.quotaWindows) { window in
+                MenuMeterRow(label: menuWindowLabel(window), percent: window.remainingPercent)
+                    .help("\(window.title) · \(QuotaFormatters.absoluteResetText(window.resetAt))")
+            }
+        } else {
+            Text("暂无数据")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.35))
+                .frame(height: 16)
+        }
+    }
+
+    @ViewBuilder
+    private var claudeSection: some View {
+        let snapshot = apiProvider(.claude)?.lastSnapshot
+        let resets = [menuShortReset(snapshot?.extras["fiveHourResetsAt"]),
+                      menuShortReset(snapshot?.extras["sevenDayResetsAt"])].compactMap(\.self)
+        sectionHeader(name: "Claude", color: Color(hex: "#E05A2B") ?? .orange, plan: claudePlan,
+                      detail: resets.isEmpty ? nil : resets.joined(separator: " / "))
+        MenuMeterRow(label: "5小时", percent: claudeUsedRemaining("fiveHourUsed"))
+            .help("5小时 · \(menuAbsoluteReset(snapshot?.extras["fiveHourResetsAt"]))")
+        MenuMeterRow(label: "每周", percent: claudeUsedRemaining("sevenDayUsed"))
+            .help("每周 · \(menuAbsoluteReset(snapshot?.extras["sevenDayResetsAt"]))")
+        if let r = claudeRoutine {
+            MenuMeterRow(label: "Routine",
+                         percent: max(0, min(100, Int((Double(r.total - r.used) / Double(r.total) * 100).rounded()))),
+                         valueText: "\(r.used)/\(r.total)")
+                .help("Routine 今日已用 \(r.used)/\(r.total) 次")
+        }
+    }
+
+    @ViewBuilder
+    private var minimaxSection: some View {
+        if let provider = apiProvider(.minimax) {
+            let snapshot = provider.lastSnapshot
+            let interval = snapshot.map { minimaxWindowDisplay($0, window: .interval) }
+            let weekly = snapshot.map { minimaxWindowDisplay($0, window: .weekly) }
+            sectionDivider
+            sectionHeader(name: "MiniMax", color: Color(hex: provider.colorHex) ?? .purple,
+                          plan: minimaxPlan(snapshot),
+                          detail: interval.flatMap { i in weekly.map { w in "总额 \(i.meterLabel) / \(w.meterLabel)" } })
+            MenuMeterRow(label: "5小时", percent: interval?.barPercent)
+                .help(interval.map { "5小时 · \($0.summary)" } ?? "5小时")
+            MenuMeterRow(label: "每周", percent: weekly?.barPercent)
+                .help(weekly.map { "每周 · \($0.summary)" } ?? "每周")
+        }
+    }
+
+    @ViewBuilder
+    private func balanceRow(_ provider: APIKeyProviderConfig) -> some View {
+        MenuMeterRow(label: provider.displayName,
+                     percent: balanceRemaining(provider),
+                     valueText: balanceText(provider),
+                     labelColor: Color(hex: provider.colorHex) ?? .white.opacity(0.8),
+                     emphasizeLabel: true)
+    }
+
+    private var memoryRow: some View {
         HStack(spacing: 8) {
-            ForEach(apiKeyManager.providers) { provider in
-                FloatingCopyButton(
-                    title: provider.displayName,
-                    color: Color(hex: provider.colorHex) ?? .white.opacity(0.6),
-                    isCopied: copiedProviderID == provider.id,
-                    isEnabled: apiKeyManager.canCopyPrimaryValue(providerID: provider.id),
-                    action: { copyKey(provider.id) }
-                )
+            Text("内存")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+            Spacer(minLength: 0)
+            if let s = memoryMonitor.current {
+                Circle()
+                    .fill(Color(nsColor: memoryPressureColor(s.pressureLevel)))
+                    .frame(width: 7, height: 7)
+                Text(String(format: "%.1f / %.0f GB", s.usedBytes / 1_073_741_824, s.physicalBytes / 1_073_741_824))
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.85))
+            } else {
+                Text("--")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.4))
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
+        .frame(height: 18)
     }
 
-    private func copyKey(_ providerID: APIKeyProviderID) {
-        let value = apiKeyManager.primaryCopyValue(providerID: providerID)
-        guard !value.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        showCopiedFeedback(for: providerID)
+    private func apiProvider(_ id: APIKeyProviderID) -> APIKeyProviderConfig? {
+        apiKeyManager.providers.first(where: { $0.id == id })
     }
 
-    private func showCopiedFeedback(for providerID: APIKeyProviderID) {
-        copyFeedbackToken &+= 1
-        let token = copyFeedbackToken
-        copiedProviderID = nil
-        DispatchQueue.main.async {
-            copiedProviderID = providerID
+    private func claudeUsedRemaining(_ key: String) -> Int? {
+        guard let val = apiProvider(.claude)?.lastSnapshot?.extras[key], let used = Int(val) else { return nil }
+        return max(0, min(100, 100 - used))
+    }
+
+    private var claudePlan: String? {
+        guard let snapshot = apiProvider(.claude)?.lastSnapshot else { return "未同步" }
+        return snapshot.extras["planName"].map(displayPlanName) ?? snapshot.extras["billingStatus"]
+    }
+
+    private var claudeRoutine: (used: Int, total: Int)? {
+        guard let snapshot = apiProvider(.claude)?.lastSnapshot,
+              let total = Int(snapshot.extras["routineTotal"] ?? ""), total > 0 else { return nil }
+        return (Int(snapshot.extras["routineUsed"] ?? "0") ?? 0, total)
+    }
+
+    private func minimaxPlan(_ snapshot: APIBalanceSnapshot?) -> String? {
+        guard let snapshot else { return "未配置" }
+        if let planName = snapshot.extras["planName"]?.trimmingCharacters(in: .whitespacesAndNewlines), !planName.isEmpty {
+            return displayPlanName(planName)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
-            if copyFeedbackToken == token {
-                copiedProviderID = nil
+        return "Token Plan 共享额度"
+    }
+
+    private func menuAbsoluteReset(_ iso: String?) -> String {
+        guard let iso, let date = DateCoding.parseISO8601(iso) else { return "--" }
+        return QuotaFormatters.absoluteResetText(date)
+    }
+
+    /// 短重置文案（区头聚合用）：去掉"重置"后缀，如 "明天 00:05"。
+    private func menuShortReset(_ iso: String?) -> String? {
+        guard let iso, let date = DateCoding.parseISO8601(iso) else { return nil }
+        return QuotaFormatters.absoluteResetText(date).replacingOccurrences(of: " 重置", with: "")
+    }
+
+    /// Codex 区头聚合重置时间："明天 00:05 / 周四 19:05"（仅主 5小时/每周窗口，不含 Spark）。
+    private func codexResetSummary(_ slot: AccountSlot) -> String? {
+        guard let snap = slot.lastSnapshot else { return nil }
+        let main = snap.quotaWindows.filter { !$0.title.hasPrefix("Spark") }
+        let parts = [main.first(where: { $0.kind == .session }), main.first(where: { $0.kind == .weekly })]
+            .compactMap { window -> String? in
+                guard let resetAt = window?.resetAt else { return nil }
+                return QuotaFormatters.absoluteResetText(resetAt).replacingOccurrences(of: " 重置", with: "")
             }
+        return parts.isEmpty ? nil : parts.joined(separator: " / ")
+    }
+
+    private func balanceRemaining(_ provider: APIKeyProviderConfig) -> Int? {
+        guard let snapshot = provider.lastSnapshot else { return nil }
+        switch provider.id {
+        case .deepseek:
+            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        default:
+            return max(0, 100 - snapshot.usedPercent)
         }
+    }
+
+    private func balanceText(_ provider: APIKeyProviderConfig) -> String {
+        guard let snapshot = provider.lastSnapshot else { return "未配置" }
+        if provider.id == .comfly { return snapshot.extras["balanceYuan"] ?? snapshot.balance }
+        return snapshot.balance
     }
 
     private var actionBarDivider: some View {
@@ -875,18 +1399,117 @@ private struct MonitorPanelView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(
-            LinearGradient(
-                colors: [Color.white.opacity(0.05), Color.black.opacity(0.16)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+    }
+}
+
+/// 原生菜单风的一行进度表：标签 + 胶囊条（额度状态色）+ 数值（默认百分比，可覆写成余额/次数）。
+/// 纯静态绘制；数字默认中性色，仅剩余 <20% 变红（与菜单栏图标同一套语言）。
+private struct MenuMeterRow: View {
+    let label: String
+    let percent: Int?
+    var valueText: String? = nil
+    var labelColor: Color = .white.opacity(0.45)
+    var emphasizeLabel: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: emphasizeLabel ? 11.5 : 10.5, weight: emphasizeLabel ? .semibold : .regular))
+                .foregroundStyle(labelColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 56, alignment: .leading)
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.10))
+                    if let percent {
+                        Capsule()
+                            .fill(quotaTint)
+                            .frame(width: max(4, proxy.size.width * CGFloat(min(100, max(0, percent))) / 100))
+                    }
+                }
+            }
+            .frame(height: 4)
+
+            Text(valueText ?? percent.map { "\(min(100, max(0, $0)))%" } ?? "--")
+                .font(.system(size: 10.5, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(percentColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 44, alignment: .trailing)
+        }
+        .frame(height: 16)
+    }
+
+    private var quotaTint: Color {
+        guard let p = percent else { return .white.opacity(0.3) }
+        if p < 20 { return Color(red: 0.96, green: 0.37, blue: 0.31) }
+        if p < 50 { return Color(red: 0.98, green: 0.78, blue: 0.22) }
+        return Color(red: 0.30, green: 0.85, blue: 0.47)
+    }
+
+    private var percentColor: Color {
+        if let p = percent, p < 20 { return Color(red: 0.96, green: 0.37, blue: 0.31) }
+        return .white.opacity(0.85)
+    }
+}
+
+/// 菜单行里 Codex 额度窗口的短标签（Spark 窗口保留 Spark 前缀以便区分）。
+private func menuWindowLabel(_ window: QuotaWindow) -> String {
+    switch window.title {
+    case "Spark 5小时": return "Spark 5h"
+    case "Spark 每周": return "Spark 周"
+    default:
+        switch window.kind {
+        case .session: return "5小时"
+        case .weekly: return "每周"
+        case .credits: return "余额"
+        case .unknown: return window.title
+        }
     }
 }
 
 private enum PanelMetrics {
     static let width: CGFloat = 344
+    static let menuWidth: CGFloat = 292
+
+    /// 原生菜单风弹窗高度：按各分区行数累加（行高/分隔线与 MonitorPanelView 布局保持一致）。
+    static func menuHeight(codexRowCounts: [Int], claudeRows: Int, hasMiniMax: Bool,
+                           balanceRows: Int, hasError: Bool) -> CGFloat {
+        let headerH: CGFloat = 36
+        let actionBarH: CGFloat = 46
+        let scrollPadding: CGFloat = 16
+        let sectionHeaderH: CGFloat = 20
+        let rowH: CGFloat = 16
+        let dividerH: CGFloat = 12.5
+
+        var content: CGFloat = 0
+        var sections = 0
+        if codexRowCounts.isEmpty {
+            content += 24
+            sections += 1
+        } else {
+            for count in codexRowCounts {
+                content += sectionHeaderH + CGFloat(count) * rowH
+                sections += 1
+            }
+        }
+        content += sectionHeaderH + CGFloat(claudeRows) * rowH
+        sections += 1
+        if hasMiniMax {
+            content += sectionHeaderH + 2 * rowH
+            sections += 1
+        }
+        content += CGFloat(balanceRows) * rowH
+        sections += balanceRows
+        content += 18   // 内存行
+        sections += 1
+        content += CGFloat(max(0, sections - 1)) * dividerH
+        if hasError { content += 40 }
+        return headerH + scrollPadding + content + actionBarH
+    }
     static let heightScale: CGFloat = 1.0
     static let minHeight: CGFloat = 320
     static let maxHeight: CGFloat = 760
@@ -1326,8 +1949,8 @@ private struct APIBalanceRow: View {
     private var meterRows: some View {
         if provider.id == .minimax {
             VStack(spacing: 4) {
-                APIUsageMeter(label: "5小时", remainingPercent: minimaxIntervalRemaining, color: color)
-                APIUsageMeter(label: "每周", remainingPercent: minimaxWeeklyRemaining, color: color.opacity(0.88))
+                APIUsageMeter(label: minimaxIntervalDisplay.meterLabel, remainingPercent: minimaxIntervalDisplay.barPercent, color: color)
+                APIUsageMeter(label: minimaxWeeklyDisplay.meterLabel, remainingPercent: minimaxWeeklyDisplay.barPercent, color: color.opacity(0.88))
             }
         } else if provider.id == .claude, provider.lastSnapshot?.extras["fiveHourUsed"] != nil {
             VStack(spacing: 4) {
@@ -1354,6 +1977,9 @@ private struct APIBalanceRow: View {
             let status = snapshot.extras["billingStatus"] ?? "订阅中"
             return "\(snapshot.balance) · \(status)"
         }
+        if provider.id == .minimax {
+            return "Token Plan 共享额度"
+        }
         if let balanceYuan = snapshot.extras["balanceYuan"] {
             return "\(snapshot.balance) · \(balanceYuan)"
         }
@@ -1361,11 +1987,6 @@ private struct APIBalanceRow: View {
             return "\(snapshot.balance) \(unit)"
         }
         return snapshot.balance
-    }
-
-    private var statusText: String {
-        guard provider.lastSnapshot != nil else { return "--" }
-        return "\(remainingPercent)%"
     }
 
     private var updatedText: String {
@@ -1383,9 +2004,7 @@ private struct APIBalanceRow: View {
             let full = snapshot.extras["displayFullBalance"] ?? snapshot.total ?? "¥10.00"
             return "余额 \(snapshot.balance) / 满格 \(full)"
         case .minimax:
-            let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
-            let interval = "\(snapshot.extras["intervalUsed"] ?? "--")/\(snapshot.extras["intervalTotal"] ?? "--")"
-            return "5小时 \(interval) · 每周 \(weekly)"
+            return minimaxQuotaSummary(snapshot)
         case .comfly:
             if let balanceYuan = snapshot.extras["balanceYuan"] {
                 return "约 \(balanceYuan) · 原始 quota \(snapshot.extras["quota"] ?? "--")"
@@ -1419,7 +2038,7 @@ private struct APIBalanceRow: View {
         case .deepseek:
             return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
         case .minimax:
-            return minimaxIntervalRemaining
+            return minimaxIntervalDisplay.barPercent
         case .comfly:
             return max(0, 100 - snapshot.usedPercent)
         case .claude:
@@ -1430,14 +2049,14 @@ private struct APIBalanceRow: View {
         }
     }
 
-    private var minimaxIntervalRemaining: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+    private var minimaxIntervalDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .interval)
     }
 
-    private var minimaxWeeklyRemaining: Int {
-        guard let snapshot = provider.lastSnapshot else { return 0 }
-        return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+    private var minimaxWeeklyDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .weekly)
     }
 }
 
@@ -1547,8 +2166,8 @@ private struct APIBalanceCard: View {
                 )
             }
         } else if provider.id == .minimax, provider.lastSnapshot != nil {
-            metricLine(title: "5小时", value: minimaxResetDisplay, meterLabel: minimaxRemainingLabel, percent: minimaxIntervalRemaining)
-            metricLine(title: "每周", value: "接口未提供", meterLabel: "未提供", percent: minimaxWeeklyRemaining)
+            metricLine(title: "5小时", value: minimaxIntervalDisplay.summary, meterLabel: minimaxIntervalDisplay.meterLabel, percent: minimaxIntervalDisplay.barPercent)
+            metricLine(title: "每周", value: minimaxWeeklyDisplay.summary, meterLabel: minimaxWeeklyDisplay.meterLabel, percent: minimaxWeeklyDisplay.barPercent)
         }
     }
 
@@ -1609,7 +2228,7 @@ private struct APIBalanceCard: View {
         case .deepseek:
             return snapshot.balance
         case .minimax:
-            return snapshot.extras["modelName"] ?? snapshot.unit
+            return "Token Plan 共享额度"
         case .comfly:
             return snapshot.extras["balanceYuan"] ?? snapshot.balance
         case .claude:
@@ -1620,7 +2239,7 @@ private struct APIBalanceCard: View {
     private var primaryMetricLabel: String {
         switch provider.id {
         case .deepseek: return "余额"
-        case .minimax: return "模型"
+        case .minimax: return "额度"
         case .comfly: return "余额"
         case .claude: return "状态"
         }
@@ -1636,6 +2255,9 @@ private struct APIBalanceCard: View {
                 return "5小时 \(max(0, 100-(Int(fh) ?? 0)))% · 每周 \(max(0, 100-(Int(sd) ?? 0)))%"
             }
             return "\(snapshot.balance) · \(snapshot.extras["billingStatus"] ?? "订阅中")"
+        }
+        if provider.id == .minimax {
+            return "Token Plan 共享额度"
         }
         if let balanceYuan = snapshot.extras["balanceYuan"] { return "\(snapshot.balance) · \(balanceYuan)" }
         if let unit = snapshot.unit { return "\(snapshot.balance) \(unit)" }
@@ -1656,7 +2278,7 @@ private struct APIBalanceCard: View {
         case .deepseek:
             return snapshot.extras["displayFullBalance"].map { "满格参考 \($0)" } ?? "余额 \(snapshot.balance)"
         case .minimax:
-            return "5小时 \(snapshot.extras["intervalUsed"] ?? "--")/\(snapshot.extras["intervalTotal"] ?? "--") · 每周 \(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
+            return minimaxQuotaSummary(snapshot)
         case .comfly:
             return snapshot.extras["displayFullBalance"].map { "满格参考 \($0)" } ?? (snapshot.extras["balanceYuan"].map { "约 \($0)" } ?? "未配置")
         case .claude:
@@ -1734,20 +2356,14 @@ private struct APIBalanceCard: View {
         return Int(snapshot.extras["weeklyRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
     }
 
-    private var minimaxResetDisplay: String {
-        guard let snapshot = provider.lastSnapshot else { return "重置时间 --" }
-        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
-            return QuotaFormatters.absoluteResetText(date)
-        }
-        return snapshot.extras["intervalRemainsTime"].map { "\($0)后重置" } ?? "重置时间 --"
+    private var minimaxIntervalDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .interval)
     }
 
-    private var minimaxRemainingLabel: String {
-        guard let snapshot = provider.lastSnapshot else { return "--" }
-        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
-            return QuotaFormatters.compactRemainingDurationText(date)
-        }
-        return snapshot.extras["intervalRemainsTime"] ?? "--"
+    private var minimaxWeeklyDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = provider.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .weekly)
     }
 }
 
@@ -1923,62 +2539,44 @@ private struct MemoryCardView: View {
 
 private struct MemorySparkline: View {
     let points: [MemoryPoint]
-    private let windowSeconds: TimeInterval = 60
-    private let frameInterval: TimeInterval = 0.25
 
+    // No animation timer: the line re-renders only when `points` changes (~every sample),
+    // points evenly spaced by index. Cheap; the line just steps forward each update.
     var body: some View {
-        TimelineView(.periodic(from: .now, by: frameInterval)) { timeline in
-            GeometryReader { proxy in
-                let w = proxy.size.width
-                let h = proxy.size.height
-                let renderPoints = renderedPoints(now: timeline.date)
-                let windowStart = timeline.date.addingTimeInterval(-windowSeconds)
-                let maxV = max(renderPoints.map(\.ratio).max() ?? 0.05, 0.05)
-                let pts = renderPoints.map { point -> CGPoint in
-                    let progress = min(1, max(0, point.capturedAt.timeIntervalSince(windowStart) / windowSeconds))
-                    return CGPoint(
-                        x: w * CGFloat(progress),
-                        y: h - h * CGFloat(min(1, point.ratio / maxV)) * 0.9 - 2
-                    )
-                }
-                ZStack {
-                    if pts.count > 1 {
-                        // Group consecutive same-level points into runs, each keeping its
-                        // historical color while the time window glides between samples.
-                        ForEach(Array(colorRuns(for: renderPoints).enumerated()), id: \.offset) { _, run in
-                            let c = Color(nsColor: memoryPressureColor(run.level))
-                            if run.end > run.start {
-                                Path { p in
-                                    p.move(to: CGPoint(x: pts[run.start].x, y: h))
-                                    for i in run.start...run.end { p.addLine(to: pts[i]) }
-                                    p.addLine(to: CGPoint(x: pts[run.end].x, y: h))
-                                    p.closeSubpath()
-                                }
-                                .fill(c.opacity(0.26))
-                                Path { p in
-                                    p.move(to: pts[run.start])
-                                    for i in (run.start + 1)...run.end { p.addLine(to: pts[i]) }
-                                }
-                                .stroke(c.opacity(0.9), style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
+        GeometryReader { proxy in
+            let w = proxy.size.width
+            let h = proxy.size.height
+            let n = points.count
+            let maxV = max(points.map(\.ratio).max() ?? 0.05, 0.05)
+            let pts = points.enumerated().map { i, point -> CGPoint in
+                CGPoint(
+                    x: n <= 1 ? 0 : w * CGFloat(i) / CGFloat(n - 1),
+                    y: h - h * CGFloat(min(1, point.ratio / maxV)) * 0.9 - 2
+                )
+            }
+            ZStack {
+                if pts.count > 1 {
+                    // Group consecutive same-level points into runs, each keeping its historical color.
+                    ForEach(Array(colorRuns(for: points).enumerated()), id: \.offset) { _, run in
+                        let c = Color(nsColor: memoryPressureColor(run.level))
+                        if run.end > run.start {
+                            Path { p in
+                                p.move(to: CGPoint(x: pts[run.start].x, y: h))
+                                for i in run.start...run.end { p.addLine(to: pts[i]) }
+                                p.addLine(to: CGPoint(x: pts[run.end].x, y: h))
+                                p.closeSubpath()
                             }
+                            .fill(c.opacity(0.26))
+                            Path { p in
+                                p.move(to: pts[run.start])
+                                for i in (run.start + 1)...run.end { p.addLine(to: pts[i]) }
+                            }
+                            .stroke(c.opacity(0.9), style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
                         }
                     }
                 }
             }
         }
-    }
-
-    private func renderedPoints(now: Date) -> [MemoryPoint] {
-        guard let latest = points.last else { return [] }
-        let windowStart = now.addingTimeInterval(-windowSeconds)
-        var visible = points.filter { $0.capturedAt >= windowStart && $0.capturedAt <= now }
-        if let previous = points.last(where: { $0.capturedAt < windowStart }) {
-            visible.insert(previous, at: 0)
-        }
-        if latest.capturedAt < now {
-            visible.append(MemoryPoint(ratio: latest.ratio, level: latest.level, capturedAt: now))
-        }
-        return visible
     }
 
     /// Consecutive points sharing a pressure level become one run. Runs overlap by one point
@@ -2046,12 +2644,12 @@ private struct SubscriptionCardStack: View {
             FloatingProviderCard(
                 title: "MiniMax",
                 color: Color(hex: "#7C3AED") ?? .purple,
-                subtitleLabel: "模型",
+                subtitleLabel: "额度",
                 subtitle: minimaxSubtitle,
-                primaryLabel: "5小时", primaryValue: apiRemaining(.minimax),
-                primaryMeterLabel: minimaxFloatingRemainingLabel,
-                secondaryLabel: "每周", secondaryValue: apiWeeklyRemaining(.minimax),
-                secondaryMeterLabel: "未提供",
+                primaryLabel: "5小时", primaryValue: minimaxIntervalDisplay.barPercent,
+                primaryMeterLabel: minimaxIntervalDisplay.meterLabel,
+                secondaryLabel: "每周", secondaryValue: minimaxWeeklyDisplay.barPercent,
+                secondaryMeterLabel: minimaxWeeklyDisplay.meterLabel,
                 resetLines: minimaxResetLines,
                 refreshCadence: refreshCadence,
                 isRefreshing: apiKeyManager.refreshingProviderIDs.contains(.minimax),
@@ -2157,24 +2755,14 @@ private struct SubscriptionCardStack: View {
         if let planName = snapshot.extras["planName"]?.trimmingCharacters(in: .whitespacesAndNewlines), !planName.isEmpty {
             return displayPlanName(planName)
         }
-        if let modelName = snapshot.extras["modelName"] {
-            return modelName
-        }
-        let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
-        return "每周额度 \(weekly)"
+        return "Token Plan 共享额度"
     }
 
     private var minimaxResetLines: [String] {
         guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return [] }
-        let intervalLine: String
-        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
-            intervalLine = "5小时 \(QuotaFormatters.absoluteResetText(date))"
-        } else if let remains = snapshot.extras["intervalRemainsTime"] {
-            intervalLine = "5小时 \(remains)后重置"
-        } else {
-            intervalLine = "5小时 重置时间 --"
-        }
-        return [intervalLine, "每周 重置时间接口未提供"]
+        let intervalLine = "5小时 \(minimaxWindowDisplay(snapshot, window: .interval).summary)"
+        let weeklyLine = "每周 \(minimaxWindowDisplay(snapshot, window: .weekly).summary)"
+        return [intervalLine, weeklyLine]
     }
 
     private func floatingAbsoluteReset(_ iso: String?, fallback: String? = nil) -> String {
@@ -2191,12 +2779,14 @@ private struct SubscriptionCardStack: View {
         return fallback ?? "--"
     }
 
-    private var minimaxFloatingRemainingLabel: String {
-        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return "--" }
-        if let iso = snapshot.extras["intervalResetAt"], let date = DateCoding.parseISO8601(iso) {
-            return QuotaFormatters.compactRemainingDurationText(date)
-        }
-        return snapshot.extras["intervalRemainsTime"] ?? "--"
+    private var minimaxIntervalDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .interval)
+    }
+
+    private var minimaxWeeklyDisplay: MiniMaxQuotaWindowDisplay {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else { return emptyMiniMaxQuotaDisplay }
+        return minimaxWindowDisplay(snapshot, window: .weekly)
     }
 }
 
@@ -2218,7 +2808,7 @@ private struct FloatingDesktopWidgetView: View {
         // per-second full redraw of the whole card stack is wasteful.
         TimelineView(.periodic(from: .now, by: 10)) { _ in
             ZStack {
-                VisualEffectBackground(material: .hudWindow, blendingMode: .behindWindow)
+                Color(red: 0.03, green: 0.03, blue: 0.05)  // opaque base — was a behind-window blur that the ~0.97 gradient covered anyway (live backdrop blur = constant GPU cost)
                 LinearGradient(
                     colors: [
                         Color(red: 0.05, green: 0.05, blue: 0.08).opacity(0.96),
@@ -2396,30 +2986,17 @@ private struct FloatingDesktopWidgetView: View {
 }
 
 /// Breathing opacity computed from a low-rate TimelineView (no repeatForever → no 60fps
-/// full-tree re-render). Only this tiny shape re-renders ~8×/sec while running.
-private func breathingOpacity(_ date: Date, low: Double, high: Double, period: Double = 1.9) -> Double {
-    let t = date.timeIntervalSinceReferenceDate
-    let phase = 0.5 + 0.5 * sin(t * 2 * Double.pi / period)
-    return low + (high - low) * phase
-}
-
+/// Static status border — running just shows a brighter/thicker solid stroke (no animation,
+/// no per-frame redraw). Cheap.
 private struct BreathingBorder: View {
     let color: Color
     let running: Bool
     var cornerRadius: CGFloat = 12
 
     var body: some View {
-        if running {
-            TimelineView(.periodic(from: .now, by: 0.12)) { ctx in
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .stroke(color, lineWidth: 1.4)
-                    .opacity(breathingOpacity(ctx.date, low: 0.30, high: 0.95))
-            }
-        } else {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .stroke(color, lineWidth: 1.0)
-                .opacity(0.5)
-        }
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .stroke(color, lineWidth: running ? 1.5 : 1.0)
+            .opacity(running ? 0.9 : 0.5)
     }
 }
 
@@ -2428,14 +3005,7 @@ private struct BreathingDot: View {
     let running: Bool
 
     var body: some View {
-        if running {
-            TimelineView(.periodic(from: .now, by: 0.12)) { ctx in
-                Circle().fill(color).frame(width: 7, height: 7)
-                    .opacity(breathingOpacity(ctx.date, low: 0.4, high: 1.0))
-            }
-        } else {
-            Circle().fill(color).frame(width: 7, height: 7)
-        }
+        Circle().fill(color).frame(width: 7, height: 7)
     }
 }
 
@@ -2584,46 +3154,34 @@ private struct FloatingRefreshProgress: View {
     @ObservedObject var cadence: RefreshCadence
     let isRefreshing: Bool
     let action: () -> Void
-    @State private var isHovering = false
     private let color = Color(red: 0.19, green: 0.78, blue: 0.86)
 
+    // No per-second ticker: re-renders only when the parent refreshes (~10s) or `cadence`
+    // publishes. The countdown text is coarse (≈10s granularity) — fine for a 120s interval —
+    // and the ring is drawn statically (no animation).
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let state = progressState(now: timeline.date)
-            HStack(spacing: 5) {
-                Text(state.label)
-                    .font(.custom("Avenir Next Demi Bold", size: 7.5))
-                    .foregroundStyle(.white.opacity(isRefreshing || cadence.isRefreshing ? 0.52 : 0.34))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .frame(width: 34, alignment: .trailing)
+        let state = progressState(now: Date())
+        return HStack(spacing: 5) {
+            Text(state.label)
+                .font(.custom("Avenir Next Demi Bold", size: 7.5))
+                .foregroundStyle(.white.opacity(isRefreshing || cadence.isRefreshing ? 0.52 : 0.34))
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(width: 34, alignment: .trailing)
 
-                Button(action: action) {
-                    ZStack {
-                        Circle()
-                            .fill(.white.opacity(isHovering ? 0.07 : 0.02))
-                        Circle()
-                            .stroke(.white.opacity(isHovering ? 0.16 : 0.09), lineWidth: 1.5)
-                        Circle()
-                            .trim(from: 0, to: state.progress)
-                            .stroke(
-                                color.opacity(isHovering ? 1 : 0.92),
-                                style: StrokeStyle(lineWidth: isHovering ? 2 : 1.7, lineCap: .round)
-                            )
-                            .rotationEffect(.degrees(-90))
-                            .animation(.linear(duration: 0.2), value: state.progress)
-                    }
-                    .frame(width: 15, height: 15)
-                    .scaleEffect(isHovering ? 1.13 : 1)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isHovering)
+            Button(action: action) {
+                ZStack {
+                    Circle().stroke(.white.opacity(0.09), lineWidth: 1.5)
+                    Circle()
+                        .trim(from: 0, to: state.progress)
+                        .stroke(color.opacity(0.92), style: StrokeStyle(lineWidth: 1.7, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
                 }
-                .buttonStyle(.borderless)
-                .disabled(isRefreshing)
-                .onHover { hovering in
-                    isHovering = hovering
-                }
-                .help("刷新")
+                .frame(width: 15, height: 15)
             }
+            .buttonStyle(.borderless)
+            .disabled(isRefreshing)
+            .help("刷新")
         }
         .frame(width: 55, height: 18)
         .help("下次自动刷新")
@@ -2907,7 +3465,7 @@ private struct FloatingAPIBalanceCard: View {
         switch provider.id {
         case .deepseek, .comfly: return "余额"
         case .claude: return "状态"
-        case .minimax: return "模型"
+        case .minimax: return "额度"
         }
     }
 
@@ -2919,7 +3477,7 @@ private struct FloatingAPIBalanceCard: View {
         case .comfly:
             return snapshot.extras["balanceYuan"] ?? snapshot.balance
         case .minimax:
-            return snapshot.extras["modelName"] ?? snapshot.unit
+            return "Token Plan 共享额度"
         case .claude:
             return snapshot.extras["billingStatus"] ?? snapshot.extras["billingPeriod"]
         }
@@ -2933,7 +3491,7 @@ private struct FloatingAPIBalanceCard: View {
         case .comfly:
             return snapshot.extras["displayFullBalance"].map { "满格参考 \($0)" } ?? (snapshot.extras["balanceYuan"].map { "约 \($0)" } ?? "未配置")
         case .minimax:
-            return snapshot.extras["modelName"] ?? snapshot.balance
+            return minimaxQuotaSummary(snapshot)
         case .claude:
             return snapshot.extras["billingPeriod"] ?? "订阅中"
         }
@@ -2947,7 +3505,7 @@ private struct FloatingAPIBalanceCard: View {
         case .comfly:
             return max(0, 100 - snapshot.usedPercent)
         case .minimax:
-            return Int(snapshot.extras["intervalRemainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+            return minimaxWindowDisplay(snapshot, window: .interval).barPercent
         case .claude:
             return max(0, 100 - snapshot.usedPercent)
         }
@@ -3011,6 +3569,78 @@ private func quotaColor(_ value: Int?) -> Color {
     if value <= 20 { return Color(red: 0.85, green: 0.28, blue: 0.28) }
     if value <= 50 { return Color(red: 0.90, green: 0.65, blue: 0.20) }
     return Color(red: 0.15, green: 0.85, blue: 0.45)
+}
+
+private func minimaxQuotaSummary(_ snapshot: APIBalanceSnapshot) -> String {
+    if snapshot.extras["intervalQuotaTotalPercent"] != nil || snapshot.extras["weeklyQuotaTotalPercent"] != nil {
+        let interval = minimaxWindowDisplay(snapshot, window: .interval).summary
+        let weekly = minimaxWindowDisplay(snapshot, window: .weekly).summary
+        return "5小时 \(interval) · 每周 \(weekly)"
+    }
+    let intervalTotal = Int(snapshot.extras["intervalTotal"] ?? "") ?? 0
+    let weeklyTotal = Int(snapshot.extras["weeklyTotal"] ?? "") ?? 0
+    if intervalTotal > 0 || weeklyTotal > 0 {
+        let interval = "\(snapshot.extras["intervalUsed"] ?? "--")/\(snapshot.extras["intervalTotal"] ?? "--")"
+        let weekly = "\(snapshot.extras["weeklyUsed"] ?? "--")/\(snapshot.extras["weeklyTotal"] ?? "--")"
+        return "5小时 \(interval) · 每周 \(weekly)"
+    }
+    let intervalRemaining = snapshot.extras["intervalRemainingPercent"] ?? "\(max(0, 100 - snapshot.usedPercent))"
+    let weeklyRemaining = snapshot.extras["weeklyRemainingPercent"] ?? intervalRemaining
+    return "5小时剩余 \(intervalRemaining)% · 每周剩余 \(weeklyRemaining)%"
+}
+
+private enum MiniMaxQuotaWindow {
+    case interval
+    case weekly
+}
+
+private let emptyMiniMaxQuotaDisplay = MiniMaxQuotaWindowDisplay(
+    summary: "--",
+    meterLabel: "--",
+    barPercent: 0,
+    trailingLabel: "--"
+)
+
+private func minimaxWindowDisplay(_ snapshot: APIBalanceSnapshot, window: MiniMaxQuotaWindow) -> MiniMaxQuotaWindowDisplay {
+    switch window {
+    case .interval:
+        return MiniMaxQuotaDisplay.window(
+            extras: snapshot.extras,
+            remainingKey: "intervalRemainingPercent",
+            totalKey: "intervalQuotaTotalPercent",
+            usedKey: "intervalQuotaUsedPercent",
+            fallbackUsedPercent: snapshot.usedPercent
+        )
+    case .weekly:
+        return MiniMaxQuotaDisplay.window(
+            extras: snapshot.extras,
+            remainingKey: "weeklyRemainingPercent",
+            totalKey: "weeklyQuotaTotalPercent",
+            usedKey: "weeklyQuotaUsedPercent",
+            fallbackUsedPercent: snapshot.usedPercent
+        )
+    }
+}
+
+private func minimaxUsageDisplay(_ snapshot: APIBalanceSnapshot, totalKey: String, usedKey: String) -> String {
+    guard let total = snapshot.extras[totalKey], let used = snapshot.extras[usedKey] else {
+        return "--"
+    }
+    return "总额\(total)% · 已用\(used)%"
+}
+
+private func minimaxResetText(_ snapshot: APIBalanceSnapshot, key: String, fallbackKey: String) -> String {
+    if let iso = snapshot.extras[key], let date = DateCoding.parseISO8601(iso) {
+        return QuotaFormatters.absoluteResetText(date)
+    }
+    return snapshot.extras[fallbackKey].map { "\($0)后重置" } ?? "重置时间 --"
+}
+
+private func minimaxRemainingDurationLabel(_ snapshot: APIBalanceSnapshot, key: String, fallbackKey: String) -> String {
+    if let iso = snapshot.extras[key], let date = DateCoding.parseISO8601(iso) {
+        return QuotaFormatters.compactRemainingDurationText(date)
+    }
+    return snapshot.extras[fallbackKey] ?? "--"
 }
 
 private func displayPlanName(_ raw: String) -> String {
@@ -3216,25 +3846,6 @@ private struct MessageStrip: View {
     }
 }
 
-private struct VisualEffectBackground: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-    let blendingMode: NSVisualEffectView.BlendingMode
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-    }
-}
-
 private struct IconButton: View {
     let title: String
     let systemImage: String
@@ -3272,8 +3883,12 @@ private struct APIKeySettingsView: View {
     @ObservedObject var quotaManager: QuotaManager
     var openDataFolder: () -> Void = {}
     var applyStatusBarVisibility: () -> Void = {}
-    @AppStorage("showCodexTrafficLight") private var showTrafficLight = true
-    @AppStorage("showMemoryIndicator") private var showMemory = true
+    @AppStorage("showCodexTrafficLight") private var showTrafficLight = false
+    @AppStorage("showMemoryIndicator") private var showMemory = false
+    @AppStorage("statusBarShowsWeekly") private var showWeekly = true
+    @AppStorage("statusBarShowCodex") private var showCodexInStatusBar = true
+    @AppStorage("statusBarShowClaude") private var showClaudeInStatusBar = true
+    @AppStorage("statusBarShowMiniMax") private var showMiniMaxInStatusBar = false
     @State private var drafts: [String: String] = [:]
     @State private var copiedField: String?
 
@@ -3315,25 +3930,81 @@ private struct APIKeySettingsView: View {
                 Text("状态栏显示")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
             }
-            Toggle(isOn: Binding(get: { showTrafficLight }, set: { showTrafficLight = $0; applyStatusBarVisibility() })) {
+            statusBarProviderToggle(
+                title: "Codex",
+                detail: "主状态栏显示 Codex 5 小时与每周额度",
+                isOn: $showCodexInStatusBar
+            )
+            statusBarProviderToggle(
+                title: "Claude",
+                detail: "主状态栏显示 Claude 5 小时与每周额度",
+                isOn: $showClaudeInStatusBar
+            )
+            statusBarProviderToggle(
+                title: "MiniMax",
+                detail: "主状态栏显示 MiniMax Token Plan 额度",
+                isOn: $showMiniMaxInStatusBar
+            )
+            Toggle(isOn: Binding(
+                get: { showTrafficLight },
+                set: { value in
+                    showTrafficLight = value
+                    applyStatusBarVisibility()
+                }
+            )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Codex 状态灯").font(.system(size: 13))
                     Text("🟡执行中 · 🟢已完成 · 🔴异常,数据来自 ~/.codex 会话").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
-            Toggle(isOn: Binding(get: { showMemory }, set: { showMemory = $0; applyStatusBarVisibility() })) {
+            Toggle(isOn: Binding(
+                get: { showMemory },
+                set: { value in
+                    showMemory = value
+                    applyStatusBarVisibility()
+                }
+            )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("系统内存").font(.system(size: 13))
                     Text("菜单栏显示内存折线胶囊 + 已用 GB").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
+            Toggle(isOn: Binding(
+                get: { showWeekly },
+                set: { value in
+                    showWeekly = value
+                    applyStatusBarVisibility()
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("每周进度").font(.system(size: 13))
+                    Text("状态栏图标显示每周额度进度条；关闭后只留 5 小时,更省空间").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
+    }
+
+    private func statusBarProviderToggle(title: String, detail: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: Binding(
+            get: { isOn.wrappedValue },
+            set: { value in
+                isOn.wrappedValue = value
+                applyStatusBarVisibility()
+            }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13))
+                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
     }
 
     private var header: some View {
@@ -3357,7 +4028,7 @@ private struct APIKeySettingsView: View {
             .disabled(manager.isRefreshing)
         }
         .padding(16)
-        .background(.thinMaterial)
+        .background(Color(nsColor: .underPageBackgroundColor))
     }
 
     private func bindingValues(for provider: APIKeyProviderConfig) -> Binding<[String: String]> {
@@ -3422,7 +4093,9 @@ private struct CodexAccountEditor: View {
                 if let slot {
                     Toggle("启用", isOn: Binding(
                         get: { slot.isActive },
-                        set: { manager.setSlotActive(slot.slotID, isActive: $0) }
+                        set: { value in
+                            manager.setSlotActive(slot.slotID, isActive: value)
+                        }
                     ))
                     .toggleStyle(.switch)
                     .font(.system(size: 12))
@@ -3456,7 +4129,7 @@ private struct CodexAccountEditor: View {
             }
         }
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
     }
 
@@ -3567,6 +4240,7 @@ private struct APIKeyProviderEditor: View {
     let refresh: () -> Void
     let copy: (APIKeyField) -> Void
     let setEnabled: (Bool) -> Void
+    @State private var revealedFields: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3577,7 +4251,12 @@ private struct APIKeyProviderEditor: View {
                 Text(provider.displayName)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                 Spacer()
-                Toggle("启用", isOn: Binding(get: { provider.isEnabled }, set: { value in setEnabled(value) }))
+                Toggle("启用", isOn: Binding(
+                    get: { provider.isEnabled },
+                    set: { value in
+                        setEnabled(value)
+                    }
+                ))
                     .toggleStyle(.switch)
                     .font(.system(size: 12))
             }
@@ -3619,7 +4298,7 @@ private struct APIKeyProviderEditor: View {
             }
         }
         .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
     }
 
@@ -3630,18 +4309,27 @@ private struct APIKeyProviderEditor: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 76, alignment: .leading)
-            if field.isSecure {
-                SecureField(field.placeholder, text: Binding(
-                    get: { values[key] ?? "" },
-                    set: { values[key] = $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
+            let textBinding = Binding(
+                get: { values[key] ?? "" },
+                set: { values[key] = $0 }
+            )
+            if field.isSecure && !revealedFields.contains(key) {
+                SecureField(field.placeholder, text: textBinding)
+                    .textFieldStyle(.roundedBorder)
             } else {
-                TextField(field.placeholder, text: Binding(
-                    get: { values[key] ?? "" },
-                    set: { values[key] = $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
+                TextField(field.placeholder, text: textBinding)
+                    .textFieldStyle(.roundedBorder)
+            }
+            if field.isSecure {
+                let revealed = revealedFields.contains(key)
+                Button {
+                    if revealed { revealedFields.remove(key) } else { revealedFields.insert(key) }
+                } label: {
+                    Image(systemName: revealed ? "eye.slash" : "eye")
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help(revealed ? "隐藏 \(field.label)" : "显示 \(field.label) 明文")
             }
             Button {
                 copy(field)
@@ -3699,6 +4387,9 @@ private struct APIKeyProviderEditor: View {
         if snapshot.setupState != .ready {
             return snapshot.balance
         }
+        if provider.id == .minimax {
+            return "Token Plan 共享额度"
+        }
         if let balanceYuan = snapshot.extras["balanceYuan"] {
             return "\(snapshot.balance) / \(balanceYuan)"
         }
@@ -3717,6 +4408,9 @@ private struct APIKeyProviderEditor: View {
         }
         if snapshot.status == .error, let note = snapshot.note {
             return note
+        }
+        if provider.id == .minimax {
+            return minimaxQuotaSummary(snapshot)
         }
         if let note = snapshot.note { return note }
         let total = snapshot.total.map { " / \($0)" } ?? ""
@@ -3775,10 +4469,12 @@ private struct APIProviderStatsView: View {
                 stat("赠送", snapshot.extras["grantedBalance"] ?? "--")
                 stat("充值", snapshot.extras["toppedUpBalance"] ?? "--")
             case .minimax:
-                stat("周已用", "\(snapshot.extras["weeklyUsed"] ?? "--") / \(snapshot.extras["weeklyTotal"] ?? "--")")
-                stat("周剩余", snapshot.extras["weeklyRemains"] ?? snapshot.balance)
-                stat("周期已用", "\(snapshot.extras["intervalUsed"] ?? "--") / \(snapshot.extras["intervalTotal"] ?? "--")")
-                stat("周期剩余", "\(snapshot.extras["intervalRemains"] ?? "--") · \(snapshot.extras["intervalRemainsTime"] ?? "--")")
+                stat("5小时用量", minimaxUsageDisplay(snapshot, totalKey: "intervalQuotaTotalPercent", usedKey: "intervalQuotaUsedPercent"))
+                stat("5小时剩余", "\(snapshot.extras["intervalQuotaRemainingPercent"] ?? snapshot.extras["intervalRemainingPercent"] ?? "--")%")
+                stat("5小时重置", minimaxResetText(snapshot, key: "intervalResetAt", fallbackKey: "intervalRemainsTime"))
+                stat("每周用量", minimaxUsageDisplay(snapshot, totalKey: "weeklyQuotaTotalPercent", usedKey: "weeklyQuotaUsedPercent"))
+                stat("每周剩余", "\(snapshot.extras["weeklyQuotaRemainingPercent"] ?? snapshot.extras["weeklyRemainingPercent"] ?? "--")%")
+                stat("每周重置", minimaxResetText(snapshot, key: "weeklyResetAt", fallbackKey: "weeklyRemainsTime"))
             case .comfly:
                 EmptyView()
             case .claude:
@@ -3911,10 +4607,9 @@ private extension Color {
     }
 }
 
-// MARK: - Claude WKWebView Fetcher
+// MARK: - Claude Usage Fetcher
 
-@MainActor
-private struct ClaudeCookieInfo {
+private struct ClaudeCookieInfo: Sendable {
     var value: String
     var domain: String
     var path: String
@@ -3969,22 +4664,112 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
     var onSafeStorageAccessAttempt: (@MainActor () -> Void)?
 
     func fetchOrganizations(allowsUserInteraction: Bool) async throws -> APIBalanceSnapshot {
-        // Decrypt all Claude Desktop cookies (Swift-native AES), then load the usage page
         let claudeCookies = try await prepareAllClaudeCookies(allowsUserInteraction: allowsUserInteraction)
 
+        if allowsUserInteraction {
+            return try await fetchOrganizationsWithWebView(claudeCookies: claudeCookies)
+        }
+
+        do {
+            return try await fetchOrganizationsWithHTTP(claudeCookies: claudeCookies)
+        } catch {
+            throw error
+        }
+    }
+
+    private func fetchOrganizationsWithHTTP(claudeCookies: [String: ClaudeCookieInfo]) async throws -> APIBalanceSnapshot {
+        let httpCookies = Self.httpCookies(from: claudeCookies)
+        guard let cookieHeader = HTTPCookie.requestHeaderFields(with: httpCookies)["Cookie"], !cookieHeader.isEmpty else {
+            throw ClaudeFetchError.notLoggedIn
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let userAgent = await Self.claudeDesktopUserAgent()
+        let orgsJSON = try await fetchClaudeAPIJSON(
+            path: "/api/organizations",
+            session: session,
+            userAgent: userAgent,
+            cookieHeader: cookieHeader
+        )
+        let orgs = (orgsJSON as? [[String: Any]])
+            ?? ((orgsJSON as? [String: Any])?["organizations"] as? [[String: Any]])
+        guard let orgs else {
+            throw ClaudeFetchError.unsupportedCookieSchema
+        }
+
+        var envelope: [String: Any] = ["organizations": orgs]
+        if let orgID = orgs.first?["uuid"] as? String, !orgID.isEmpty {
+            envelope["usage"] = try? await fetchClaudeAPIJSON(
+                path: "/api/organizations/\(orgID)/usage",
+                session: session,
+                userAgent: userAgent,
+                cookieHeader: cookieHeader
+            )
+            envelope["limits"] = try? await fetchClaudeAPIJSON(
+                path: "/api/organizations/\(orgID)/rate_limit_status",
+                session: session,
+                userAgent: userAgent,
+                cookieHeader: cookieHeader
+            )
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: envelope)
+        return try balanceProvider.decodeBalance(data: data, providerID: .claude)
+    }
+
+    private func fetchClaudeAPIJSON(
+        path: String,
+        session: URLSession,
+        userAgent: String,
+        cookieHeader: String
+    ) async throws -> Any {
+        guard let url = URL(string: "https://claude.ai\(path)") else {
+            throw ClaudeFetchError.webFetchFailed("Claude API URL 无效")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("https://claude.ai", forHTTPHeaderField: "Origin")
+        request.setValue("https://claude.ai/settings/usage", forHTTPHeaderField: "Referer")
+        request.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
+        request.setValue("cors", forHTTPHeaderField: "Sec-Fetch-Mode")
+        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ClaudeFetchError.networkFailure
+        }
+        if httpResponse.statusCode == 401 {
+            throw ClaudeFetchError.notLoggedIn
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw ClaudeFetchError.webFetchFailed("Claude API 返回 HTTP \(httpResponse.statusCode)")
+        }
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private func fetchOrganizationsWithWebView(claudeCookies: [String: ClaudeCookieInfo]) async throws -> APIBalanceSnapshot {
+        let userAgent = await Self.claudeDesktopUserAgent()
         return try await withCheckedThrowingContinuation { [self] cont in
             DispatchQueue.main.async {
                 self.continuation = cont
                 self.didStartDataScript = false
 
                 let config = WKWebViewConfiguration()
+                config.websiteDataStore = .nonPersistent()
 
                 let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                                    styleMask: [], backing: .buffered, defer: false)
                 win.isReleasedWhenClosed = false
                 let wv = WKWebView(frame: win.contentView!.bounds, configuration: config)
                 // Match Claude Desktop's Electron User-Agent so Cloudflare honors its cf_clearance cookie.
-                wv.customUserAgent = Self.claudeDesktopUserAgent()
+                wv.customUserAgent = userAgent
                 wv.navigationDelegate = self
                 win.contentView?.addSubview(wv)
                 self.webView = wv
@@ -3993,16 +4778,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
                 // WKWebView cookie store so both Cloudflare and claude.ai's client-side auth see a valid
                 // session. Request-header injection alone fails: the SPA re-checks cookies client-side.
                 let store = wv.configuration.websiteDataStore.httpCookieStore
-                let httpOnlyNames: Set<String> = ["sessionKey", "cf_clearance", "__cf_bm", "routingHint"]
-                var httpCookies: [HTTPCookie] = []
-                for (name, info) in claudeCookies {
-                    var props: [HTTPCookiePropertyKey: Any] = [
-                        .name: name, .value: info.value, .domain: info.domain, .path: info.path,
-                    ]
-                    if info.isSecure { props[.secure] = true }
-                    if httpOnlyNames.contains(name) { props[.init(rawValue: "HttpOnly")] = true }
-                    if let cookie = HTTPCookie(properties: props) { httpCookies.append(cookie) }
-                }
+                let httpCookies = Self.httpCookies(from: claudeCookies)
 
                 let usageURL = URL(string: "https://claude.ai/settings/usage")!
                 var didLoad = false
@@ -4029,41 +4805,123 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Build a User-Agent matching the installed Claude Desktop's Electron runtime so that the
-    /// cf_clearance cookie (issued to that UA) is accepted by Cloudflare. Versions are read from
-    /// the installed app at runtime, with a sane fallback if extraction fails.
-    private static func claudeDesktopUserAgent() -> String {
-        let fallback = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 Electron/41.6.1 Safari/537.36"
+    private static func httpCookies(from claudeCookies: [String: ClaudeCookieInfo]) -> [HTTPCookie] {
+        let httpOnlyNames: Set<String> = ["sessionKey", "cf_clearance", "__cf_bm", "routingHint"]
+        var httpCookies: [HTTPCookie] = []
+        for (name, info) in claudeCookies {
+            guard ClaudeCookieDomainFilter.isAllowedDomain(info.domain) else { continue }
+            var props: [HTTPCookiePropertyKey: Any] = [
+                .name: name, .value: info.value, .domain: info.domain, .path: info.path,
+            ]
+            if info.isSecure { props[.secure] = true }
+            if httpOnlyNames.contains(name) { props[.init(rawValue: "HttpOnly")] = true }
+            if let cookie = HTTPCookie(properties: props) { httpCookies.append(cookie) }
+        }
+        return httpCookies
+    }
+
+    private actor UserAgentCache {
+        private var cached: String?
+
+        func value(build: @Sendable @escaping () -> String) async -> String {
+            if let cached { return cached }
+            let userAgent = await Task.detached(priority: .utility) {
+                build()
+            }.value
+            cached = userAgent
+            return userAgent
+        }
+    }
+
+    private static let userAgentCache = UserAgentCache()
+
+    /// Build a User-Agent matching the installed Claude Desktop's Electron runtime. The expensive
+    /// binary scan, when needed, runs in a child process and is cached so this menu-bar app never
+    /// maps Claude's large Electron framework into its own address space.
+    private static func claudeDesktopUserAgent() async -> String {
+        await userAgentCache.value {
+            buildClaudeDesktopUserAgent()
+        }
+    }
+
+    private static func buildClaudeDesktopUserAgent() -> String {
+        let fallbackChrome = "146.0.7680.216"
+        let fallbackElectron = "41.6.1"
         let fm = FileManager.default
         let appPath = ["/Applications/Claude.app",
                        fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Claude.app").path]
             .first(where: { fm.fileExists(atPath: $0) })
-        guard let appPath else { return fallback }
+        guard let appPath else {
+            return formattedClaudeDesktopUserAgent(
+                claudeVersion: "",
+                chrome: fallbackChrome,
+                electron: fallbackElectron
+            )
+        }
 
         let claudeVersion = (Bundle(path: appPath)?.infoDictionary?["CFBundleShortVersionString"] as? String) ?? ""
-        let electronBinary = "\(appPath)/Contents/Frameworks/Electron Framework.framework/Electron Framework"
-        guard fm.fileExists(atPath: electronBinary),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: electronBinary), options: .mappedIfSafe),
-              let text = String(data: data, encoding: .isoLatin1)
-        else {
-            return fallback
-        }
+        let electron = electronFrameworkVersion(appPath: appPath) ?? fallbackElectron
+        let chrome = chromeVersionFromElectronBinary(appPath: appPath) ?? fallbackChrome
+        return formattedClaudeDesktopUserAgent(
+            claudeVersion: claudeVersion,
+            chrome: chrome,
+            electron: electron
+        )
+    }
 
-        func firstMatch(_ pattern: String) -> String? {
-            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
-            let range = NSRange(text.startIndex..., in: text)
-            guard let m = re.firstMatch(in: text, range: range), let r = Range(m.range(at: 1), in: text) else { return nil }
-            return String(text[r])
-        }
-
-        guard let chrome = firstMatch("Chrome/([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)"),
-              let electron = firstMatch("Electron/([0-9]+\\.[0-9]+\\.[0-9]+)")
-        else {
-            return fallback
-        }
-
+    private static func formattedClaudeDesktopUserAgent(claudeVersion: String, chrome: String, electron: String) -> String {
         let claudePart = claudeVersion.isEmpty ? "" : "Claude/\(claudeVersion) "
         return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \(claudePart)Chrome/\(chrome) Electron/\(electron) Safari/537.36"
+    }
+
+    private static func electronFrameworkVersion(appPath: String) -> String? {
+        let frameworkPath = "\(appPath)/Contents/Frameworks/Electron Framework.framework"
+        guard let version = Bundle(path: frameworkPath)?.infoDictionary?["CFBundleVersion"] as? String,
+              !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return version.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func chromeVersionFromElectronBinary(appPath: String) -> String? {
+        let binaryPath = "\(appPath)/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+        guard FileManager.default.fileExists(atPath: binaryPath) else { return nil }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "/usr/bin/strings \(shellQuoted(binaryPath)) | /usr/bin/grep -Eom 1 'Chrome/[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+'"
+        ]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        let deadline = Date().addingTimeInterval(3)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+        process.waitUntilExit()
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let output, output.hasPrefix("Chrome/") else { return nil }
+        let version = String(output.dropFirst("Chrome/".count))
+        return version.isEmpty ? nil : version
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func prepareAllClaudeCookies(allowsUserInteraction: Bool) async throws -> [String: ClaudeCookieInfo] {
@@ -4215,6 +5073,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
             else { continue }
             let name = String(cString: nameCStr)
             let host = String(cString: hostCStr)
+            guard ClaudeCookieDomainFilter.isAllowedDomain(host) else { continue }
             let pathStr = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "/"
             let isSecure = sqlite3_column_int(stmt, 4) != 0
 
@@ -4273,6 +5132,7 @@ private final class ClaudeWebFetcher: NSObject, @unchecked Sendable {
         didStartDataScript = false
         webView?.stopLoading()
         webView?.navigationDelegate = nil
+        webView?.removeFromSuperview()
         webView = nil
         continuation?.resume(with: result)
         continuation = nil

@@ -151,14 +151,58 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
         let weeklyTotal = model.currentWeeklyTotalCount
         let weeklyUsed = model.currentWeeklyUsageCount
         let weeklyRemains = max(0, weeklyTotal - weeklyUsed)
-        let weeklyPercent = weeklyTotal > 0 ? min(100, Int((Double(weeklyUsed) / Double(weeklyTotal) * 100).rounded())) : 0
+        let weeklyHasSignal = weeklyTotal > 0 || model.currentWeeklyRemainingPercent != nil
+        let weeklyRemainingPercent = model.currentWeeklyRemainingPercent.map(clampPercent)
+            ?? (weeklyTotal > 0 ? max(0, 100 - percentUsed(used: weeklyUsed, total: weeklyTotal)) : 0)
+        let weeklyQuotaTotalPercent = boostedTotalPercent(model.weeklyBoostPermille)
+        let weeklyQuotaRemainingPercent = boostedPercent(weeklyRemainingPercent, boostPermille: model.weeklyBoostPermille)
+        let weeklyQuotaUsedPercent = max(0, weeklyQuotaTotalPercent - weeklyQuotaRemainingPercent)
+        let weeklyPercent = weeklyQuotaUsedPercent
         let intervalTotal = model.currentIntervalTotalCount
         let intervalUsed = model.currentIntervalUsageCount
         let intervalRemains = max(0, intervalTotal - intervalUsed)
-        let intervalPercent = intervalTotal > 0 ? min(100, Int((Double(intervalUsed) / Double(intervalTotal) * 100).rounded())) : 0
-        let intervalMinutes = model.remainsTime / 60_000
-        let intervalTime = "\(intervalMinutes / 60)小时\(intervalMinutes % 60)分"
-        let intervalResetAt = Date().addingTimeInterval(TimeInterval(model.remainsTime / 1000))
+        let intervalHasSignal = intervalTotal > 0 || model.currentIntervalRemainingPercent != nil
+        let intervalRemainingPercent = model.currentIntervalRemainingPercent.map(clampPercent)
+            ?? (intervalTotal > 0 ? max(0, 100 - percentUsed(used: intervalUsed, total: intervalTotal)) : 0)
+        let intervalQuotaTotalPercent = boostedTotalPercent(model.intervalBoostPermille)
+        let intervalQuotaRemainingPercent = boostedPercent(intervalRemainingPercent, boostPermille: model.intervalBoostPermille)
+        let intervalQuotaUsedPercent = max(0, intervalQuotaTotalPercent - intervalQuotaRemainingPercent)
+        let intervalPercent = intervalQuotaUsedPercent
+        let intervalTime = durationText(milliseconds: model.remainsTime)
+        let intervalResetAt = dateFromUnixTimestamp(model.endTime)
+            ?? Date().addingTimeInterval(TimeInterval(model.remainsTime / 1000))
+        let weeklyResetAt = dateFromUnixTimestamp(model.weeklyEndTime)
+        let hasAnyQuota = weeklyHasSignal || intervalHasSignal
+        let isWarning = !hasAnyQuota
+            || (weeklyHasSignal && weeklyRemainingPercent <= 0)
+            || (intervalHasSignal && intervalRemainingPercent <= 0)
+        var extras = [
+            "weeklyRemains": "\(weeklyRemains)",
+            "weeklyUsed": "\(weeklyUsed)",
+            "weeklyTotal": "\(weeklyTotal)",
+            "weeklyUsedPercent": "\(weeklyPercent)",
+            "weeklyRemainingPercent": "\(weeklyRemainingPercent)",
+            "weeklyQuotaTotalPercent": "\(weeklyQuotaTotalPercent)",
+            "weeklyQuotaUsedPercent": "\(weeklyQuotaUsedPercent)",
+            "weeklyQuotaRemainingPercent": "\(weeklyQuotaRemainingPercent)",
+            "modelName": model.modelName,
+            "intervalRemains": "\(intervalRemains)",
+            "intervalUsed": "\(intervalUsed)",
+            "intervalTotal": "\(intervalTotal)",
+            "intervalUsedPercent": "\(intervalPercent)",
+            "intervalRemainingPercent": "\(intervalRemainingPercent)",
+            "intervalQuotaTotalPercent": "\(intervalQuotaTotalPercent)",
+            "intervalQuotaUsedPercent": "\(intervalQuotaUsedPercent)",
+            "intervalQuotaRemainingPercent": "\(intervalQuotaRemainingPercent)",
+            "intervalRemainsTime": intervalTime,
+            "intervalResetAt": DateCoding.formatISO8601(intervalResetAt)
+        ]
+        if let weeklyResetAt {
+            extras["weeklyResetAt"] = DateCoding.formatISO8601(weeklyResetAt)
+        }
+        if let weeklyRemainsTime = model.weeklyRemainsTime {
+            extras["weeklyRemainsTime"] = durationText(milliseconds: weeklyRemainsTime)
+        }
 
         return APIBalanceSnapshot(
             balance: "\(weeklyRemains)",
@@ -167,23 +211,38 @@ public final class LLMBalanceProvider: APIBalanceProvider, @unchecked Sendable {
             usedPercent: weeklyPercent,
             unit: "次/周",
             currency: "TokenPlan",
-            status: weeklyRemains <= 0 ? .warning : .ok,
-            extras: [
-                "weeklyRemains": "\(weeklyRemains)",
-                "weeklyUsed": "\(weeklyUsed)",
-                "weeklyTotal": "\(weeklyTotal)",
-                "weeklyUsedPercent": "\(weeklyPercent)",
-                "weeklyRemainingPercent": "\(max(0, 100 - weeklyPercent))",
-                "modelName": model.modelName,
-                "intervalRemains": "\(intervalRemains)",
-                "intervalUsed": "\(intervalUsed)",
-                "intervalTotal": "\(intervalTotal)",
-                "intervalUsedPercent": "\(intervalPercent)",
-                "intervalRemainingPercent": "\(max(0, 100 - intervalPercent))",
-                "intervalRemainsTime": intervalTime,
-                "intervalResetAt": DateCoding.formatISO8601(intervalResetAt)
-            ]
+            status: isWarning ? .warning : .ok,
+            note: hasAnyQuota ? nil : "MiniMax 接口未返回可用 Token Plan 额度",
+            extras: extras
         )
+    }
+
+    private func percentUsed(used: Int, total: Int) -> Int {
+        guard total > 0 else { return 0 }
+        return clampPercent(Int((Double(used) / Double(total) * 100).rounded()))
+    }
+
+    private func clampPercent(_ value: Int) -> Int {
+        min(100, max(0, value))
+    }
+
+    private func boostedTotalPercent(_ boostPermille: Int?) -> Int {
+        max(0, ((boostPermille ?? 1000) + 5) / 10)
+    }
+
+    private func boostedPercent(_ percent: Int, boostPermille: Int?) -> Int {
+        max(0, Int((Double(percent) * Double(boostPermille ?? 1000) / 1000).rounded()))
+    }
+
+    private func durationText(milliseconds: Int) -> String {
+        let minutes = max(0, milliseconds) / 60_000
+        return "\(minutes / 60)小时\(minutes % 60)分"
+    }
+
+    private func dateFromUnixTimestamp(_ value: Int?) -> Date? {
+        guard let value, value > 0 else { return nil }
+        let seconds = value > 10_000_000_000 ? Double(value) / 1000 : Double(value)
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private func decodeComfly(_ data: Data) throws -> APIBalanceSnapshot {
@@ -517,7 +576,14 @@ private struct MiniMaxModelRemain: Decodable {
     var currentWeeklyUsageCount: Int
     var currentIntervalTotalCount: Int
     var currentIntervalUsageCount: Int
+    var currentWeeklyRemainingPercent: Int?
+    var currentIntervalRemainingPercent: Int?
     var remainsTime: Int
+    var weeklyRemainsTime: Int?
+    var endTime: Int?
+    var weeklyEndTime: Int?
+    var intervalBoostPermille: Int?
+    var weeklyBoostPermille: Int?
 
     enum CodingKeys: String, CodingKey {
         case modelName = "model_name"
@@ -525,6 +591,13 @@ private struct MiniMaxModelRemain: Decodable {
         case currentWeeklyUsageCount = "current_weekly_usage_count"
         case currentIntervalTotalCount = "current_interval_total_count"
         case currentIntervalUsageCount = "current_interval_usage_count"
+        case currentWeeklyRemainingPercent = "current_weekly_remaining_percent"
+        case currentIntervalRemainingPercent = "current_interval_remaining_percent"
         case remainsTime = "remains_time"
+        case weeklyRemainsTime = "weekly_remains_time"
+        case endTime = "end_time"
+        case weeklyEndTime = "weekly_end_time"
+        case intervalBoostPermille = "interval_boost_permille"
+        case weeklyBoostPermille = "weekly_boost_permille"
     }
 }

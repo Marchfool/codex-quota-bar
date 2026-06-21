@@ -98,6 +98,16 @@ public final class APIKeyManager: ObservableObject {
         return min(100, max(0, 100 - used))
     }
 
+    public var claudeSevenDayRemaining: Int? {
+        guard let snapshot = providers.first(where: { $0.id == .claude })?.lastSnapshot,
+              let usedText = snapshot.extras["sevenDayUsed"],
+              let used = Int(usedText.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+            return nil
+        }
+        return min(100, max(0, 100 - used))
+    }
+
     public var claudeFiveHourResetAt: Date? {
         guard let resetText = providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["fiveHourResetsAt"] else {
             return nil
@@ -153,7 +163,10 @@ public final class APIKeyManager: ObservableObject {
             let allowsUserInteraction = shouldAllowSecretInteraction(trigger)
             do {
                 let snapshot = try await claudeFetcher(allowsUserInteraction)
-                providers[index].lastSnapshot = snapshot.markedReady(actionHint: "已从 Claude Desktop 同步登录态")
+                providers[index].lastSnapshot = mergeClaudeDOMOnlyMetrics(
+                    snapshot.markedReady(actionHint: "已从 Claude Desktop 同步登录态"),
+                    from: providers[index].lastSnapshot
+                )
             } catch KeychainError.userInteractionRequired {
                 if allowsUserInteraction, providers[index].lastSnapshot == nil {
                     providers[index].lastSnapshot = keychainApprovalSnapshot(for: providers[index])
@@ -260,7 +273,9 @@ public final class APIKeyManager: ObservableObject {
                 return shouldAutoRefreshClaude(provider, trigger: trigger)
             }
             if provider.hasSecureFields {
-                return provider.hasReadySnapshot
+                // Retry transient failures (e.g. keychain timeout) so they self-heal,
+                // but skip genuinely-unconfigured providers.
+                return provider.shouldAutoRefreshOnSchedule
             }
             return true
         case .polling:
@@ -268,7 +283,7 @@ public final class APIKeyManager: ObservableObject {
                 return shouldAutoRefreshClaude(provider, trigger: trigger)
             }
             if provider.hasSecureFields {
-                return provider.hasReadySnapshot
+                return provider.shouldAutoRefreshOnSchedule
             }
             return true
         }
@@ -322,6 +337,15 @@ public final class APIKeyManager: ObservableObject {
         existing.extras["actionHint"] = errorSnapshot.actionHint ?? "稍后重试"
         existing.extras["errorCode"] = errorSnapshot.errorCode ?? "claude_fetch_failed"
         return existing
+    }
+
+    private func mergeClaudeDOMOnlyMetrics(_ snapshot: APIBalanceSnapshot, from existing: APIBalanceSnapshot?) -> APIBalanceSnapshot {
+        guard let existing else { return snapshot }
+        var copy = snapshot
+        for key in ["routineUsed", "routineTotal"] where copy.extras[key] == nil {
+            copy.extras[key] = existing.extras[key]
+        }
+        return copy
     }
 
     private func persist() {

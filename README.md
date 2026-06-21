@@ -14,11 +14,11 @@ CodexQuotaBar 是一个轻量的原生 macOS 状态栏应用，用来在不打�
 
 ![CodexQuotaBar popover dashboard](docs/assets/screenshot-panel.png)
 
-![CodexQuotaBar compact menu bar readout](docs/assets/screenshot-menubar.png)
+![CodexQuotaBar configurable menu bar provider display](docs/assets/screenshot-menubar.png)
 
 ## Features
 
-- Compact macOS menu bar readout for Codex and Claude 5-hour quota windows.
+- Configurable macOS menu bar readout for Codex, Claude, MiniMax, or any provider combination.
 - Shared glass-style popover and floating desktop widget with Codex, Claude, API balance, and memory cards.
 - Official Codex quota sync with OAuth refresh support, including supplemental Spark rate limits.
 - Claude Desktop usage sync via local cookies, Electron-compatible User-Agent, and routine-run parsing.

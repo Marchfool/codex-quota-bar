@@ -41,7 +41,7 @@ public enum ProviderError: Error, LocalizedError, Equatable {
 }
 
 public final class OfficialCodexProvider: CodexQuotaProvider, @unchecked Sendable {
-    private static let supplementalRateLimitsTimeout: TimeInterval = 6
+    private static let supplementalRateLimitsTimeout: TimeInterval = 10
     private static let supplementalRateLimitsFreshCacheAge: TimeInterval = 5 * 60
     private static let supplementalRateLimitsStaleCacheAge: TimeInterval = 60 * 60
 

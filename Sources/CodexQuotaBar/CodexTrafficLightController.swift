@@ -33,59 +33,148 @@ final class CodexTrafficLightController: ObservableObject {
     @Published private(set) var mode: Mode = .idle
     @Published private(set) var detail: String = "无活动任务"
 
+    /// 当 Codex 任务状态(mode)发生变化时回调，供主菜单栏图标重绘其内嵌红绿灯圆点。
+    var onModeChange: (@MainActor () -> Void)?
+
     private var statusItem: NSStatusItem?
     private var timer: Timer?
     private var eventStream: FSEventStreamRef?
+    private var statusItemVisible = false
+    private var panelVisible = false
+    /// 主菜单栏图标内嵌了红绿灯时，即使自身独立圆点隐藏，也要持续监听。
+    private var embeddedActive = false
     private let scanQueue = DispatchQueue(label: "com.codexquotabar.trafficlight", qos: .utility)
+    private var scanScheduled = false
+    private var scanInProgress = false
+    private var pendingScan = false
+    private var lastScanStartedAt = Date.distantPast
     private var renderedMode: Mode = .idle
     private var blinkWorkItems: [DispatchWorkItem] = []
     private let menu = NSMenu()
     private let statusMenuItem = NSMenuItem(title: "Codex: 空闲", action: nil, keyEquivalent: "")
+    private let minimumScanInterval: TimeInterval = 1.25
+    private let fallbackScanInterval: TimeInterval = 10
 
     func start() {
-        guard statusItem == nil else { return }
-        let item = NSStatusBar.system.statusItem(withLength: 26)
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
-        item.menu = menu
-        statusItem = item
-        renderInitialIcon()
-
-        startFSEvents()
-        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.scanNow()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-        scanNow()
+        setVisible(true)
     }
 
     func setVisible(_ visible: Bool) {
+        statusItemVisible = visible
         if visible {
-            if statusItem == nil { start() }
+            ensureStatusItem()
             statusItem?.isVisible = true
         } else {
             statusItem?.isVisible = false
         }
+        updateMonitoringState()
+    }
+
+    func setPanelVisible(_ visible: Bool) {
+        panelVisible = visible
+        updateMonitoringState()
+    }
+
+    /// 开启/关闭"主图标内嵌红绿灯"的常驻监听（不显示自身独立圆点）。
+    func setEmbeddedActive(_ active: Bool) {
+        embeddedActive = active
+        updateMonitoringState()
+    }
+
+    private func ensureStatusItem() {
+        guard statusItem == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: 26)
+        statusMenuItem.isEnabled = false
+        if menu.items.isEmpty {
+            menu.addItem(statusMenuItem)
+        }
+        item.menu = menu
+        statusItem = item
+        renderInitialIcon()
+    }
+
+    private func updateMonitoringState() {
+        if statusItemVisible || panelVisible || embeddedActive {
+            startMonitoring()
+        } else {
+            stopMonitoring()
+        }
+    }
+
+    private func startMonitoring() {
+        startFSEvents()
+        if timer == nil {
+            let timer = Timer(timeInterval: fallbackScanInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.scanNow()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+        scanNow()
+    }
+
+    private func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
+        stopFSEvents()
+        blinkWorkItems.forEach { $0.cancel() }
+        blinkWorkItems.removeAll()
     }
 
     /// Trigger a background scan and apply the result on the main actor.
     func scanNow() {
+        scheduleScan()
+    }
+
+    private func scheduleScan(after requestedDelay: TimeInterval = 0) {
+        if scanInProgress {
+            pendingScan = true
+            return
+        }
+        guard !scanScheduled else { return }
+
+        let elapsed = Date().timeIntervalSince(lastScanStartedAt)
+        let throttleDelay = max(0, minimumScanInterval - elapsed)
+        let delay = max(requestedDelay, throttleDelay)
+        scanScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.performScan()
+            }
+        }
+    }
+
+    private func performScan() {
+        guard scanScheduled else { return }
+        scanScheduled = false
+        scanInProgress = true
+        lastScanStartedAt = Date()
         scanQueue.async {
             let result = CodexTrafficLightController.inferCurrentMode()
-            Task { @MainActor [weak self] in self?.apply(result) }
+            Task { @MainActor [weak self] in self?.finishScan(result) }
+        }
+    }
+
+    private func finishScan(_ result: (mode: Mode, detail: String)?) {
+        apply(result)
+        scanInProgress = false
+        if pendingScan {
+            pendingScan = false
+            scheduleScan()
         }
     }
 
     private func apply(_ result: (mode: Mode, detail: String)?) {
         guard let result else { return }
+        let modeChanged = mode != result.mode
         detail = result.detail
         statusItem?.button?.toolTip = "Codex: \(result.mode.label)"
         statusMenuItem.title = "Codex: \(result.mode.label) · \(result.detail)"
         setIcon(mode: result.mode, animated: true)
         mode = result.mode
+        if modeChanged { onModeChange?() }
     }
 
     // MARK: - Icon + pulse animation (ported from CodexTaskMonitor)
@@ -151,6 +240,7 @@ final class CodexTrafficLightController: ObservableObject {
     }
 
     private func startFSEvents() {
+        guard eventStream == nil else { return }
         let path = (NSHomeDirectory() as NSString).appendingPathComponent(".codex/sessions")
         guard FileManager.default.fileExists(atPath: path) else { return }
         var ctx = FSEventStreamContext(version: 0,
@@ -159,12 +249,20 @@ final class CodexTrafficLightController: ObservableObject {
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault, Self.eventCallback, &ctx,
             [path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.2,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            1.0,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents)
         ) else { return }
         FSEventStreamSetDispatchQueue(stream, scanQueue)
         FSEventStreamStart(stream)
         eventStream = stream
+    }
+
+    private func stopFSEvents() {
+        guard let stream = eventStream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        eventStream = nil
     }
 
     // MARK: - Inference (nonisolated: runs on the background scan queue)
@@ -173,9 +271,11 @@ final class CodexTrafficLightController: ObservableObject {
     nonisolated private static let candidateWindowSeconds: TimeInterval = 45 * 60
     nonisolated private static let quietTurnGraceSeconds: TimeInterval = 3 * 60
     nonisolated private static let pendingToolGraceSeconds: TimeInterval = 45 * 60
+    nonisolated private static let recentProbeLimit = 4
+    nonisolated private static let maxTailReadBytes: UInt64 = 512 * 1024
 
     nonisolated private static func inferCurrentMode() -> (mode: Mode, detail: String)? {
-        let probes = recentSessionProbes(limit: 12)
+        let probes = recentSessionProbes(limit: recentProbeLimit)
         guard !probes.isEmpty else { return (.idle, "无会话") }
 
         let now = Date()
@@ -259,7 +359,7 @@ final class CodexTrafficLightController: ObservableObject {
         guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
         defer { try? handle.close() }
         let fileSize = (try? handle.seekToEnd()) ?? 0
-        let readSize = min(UInt64(2 * 1024 * 1024), fileSize)
+        let readSize = min(maxTailReadBytes, fileSize)
         try? handle.seek(toOffset: fileSize - readSize)
         guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8), !text.isEmpty else { return nil }
 

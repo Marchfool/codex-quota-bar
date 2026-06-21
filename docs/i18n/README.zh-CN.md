@@ -14,11 +14,11 @@ CodexQuotaBar is a small native macOS menu bar app for monitoring AI usage witho
 
 ![CodexQuotaBar 下拉仪表盘](../assets/screenshot-panel.png)
 
-![CodexQuotaBar 状态栏紧凑显示](../assets/screenshot-menubar.png)
+![CodexQuotaBar 可自定义状态栏服务显示](../assets/screenshot-menubar.png)
 
 ## 功能
 
-- 在 macOS 状态栏紧凑显示 Codex 与 Claude 的 5 小时额度。
+- 在 macOS 状态栏自定义显示 Codex、Claude、MiniMax 或任意组合。
 - 下拉面板和悬浮桌面浮窗复用同一套卡片，展示 Codex、Claude、API 余额与内存状态。
 - Codex 官方额度同步支持 OAuth 自动续期，并补充显示 Spark 额度。
 - Claude Desktop 用量同步支持完整 cookie 注入、Electron UA 和 Routine 次数解析。

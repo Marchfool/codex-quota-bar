@@ -22,10 +22,13 @@ struct TestRunner {
         try codexCredentialFingerprintIgnoresTokenRotation()
         try codexImportStoresClientIDFromAccessTokenWhenIDTokenOmitsIt()
         try apiKeyStoreDoesNotPersistSecureValues()
-        await launchRefreshSkipsSecureProviderReads()
+        try minimaxPrefersResponseRemainingPercentWhenCountsAreZero()
+        try minimaxDecodesResponseResetTimes()
+        await launchRefreshSkipsSecureProviderReadsButUpdatesClaude()
         await launchRefreshUsesNonInteractiveSecretReads()
         copyAvailabilityUsesSnapshotsOnly()
-        await claudeAutoRefreshUsesSharedCadence()
+        await claudeAutoRefreshUsesNonInteractivePath()
+        await claudeAutoRefreshPreservesDOMOnlyRoutineMetrics()
         await claudeRefreshFailureKeepsLastUsageSnapshot()
         claudeErrorSnapshotsAreActionable()
         markedReadyPreservesExistingMetrics()
@@ -310,6 +313,78 @@ struct TestRunner {
         }
     }
 
+    static func minimaxPrefersResponseRemainingPercentWhenCountsAreZero() throws {
+        let provider = LLMBalanceProvider()
+        let snapshot = try provider.decodeBalance(data: Data("""
+        {
+          "base_resp": {"status_code": 0, "status_msg": "success"},
+          "model_remains": [
+            {
+              "model_name": "general",
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "current_interval_total_count": 0,
+              "current_interval_usage_count": 0,
+              "current_interval_remaining_percent": 99,
+              "current_weekly_remaining_percent": 98,
+              "remains_time": 17944325
+            }
+          ]
+        }
+        """.utf8), providerID: .minimax)
+
+        expect(snapshot.usedPercent == 2, "MiniMax headline usage should prefer response weekly remaining percent")
+        expect(snapshot.extras["intervalRemainingPercent"] == "99", "MiniMax interval remaining percent should come from response")
+        expect(snapshot.extras["weeklyRemainingPercent"] == "98", "MiniMax weekly remaining percent should come from response")
+        expect(snapshot.extras["intervalUsedPercent"] == "1", "MiniMax interval used percent should invert response remaining percent")
+        expect(snapshot.extras["weeklyUsedPercent"] == "2", "MiniMax weekly used percent should invert response remaining percent")
+        expect(snapshot.status == .ok, "MiniMax percent quota should not warn just because count totals are zero")
+        expect(snapshot.note == nil, "MiniMax percent quota should not show an unavailable quota note")
+    }
+
+    static func minimaxDecodesResponseResetTimes() throws {
+        let provider = LLMBalanceProvider()
+        let snapshot = try provider.decodeBalance(data: Data("""
+        {
+          "base_resp": {"status_code": 0, "status_msg": "success"},
+          "model_remains": [
+            {
+              "model_name": "general",
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "current_interval_total_count": 0,
+              "current_interval_usage_count": 0,
+              "current_interval_remaining_percent": 98,
+              "current_weekly_remaining_percent": 98,
+              "interval_boost_permille": 2000,
+              "weekly_boost_permille": 3000,
+              "remains_time": 16886990,
+              "weekly_remains_time": 394886990,
+              "end_time": 1780470000000,
+              "weekly_end_time": 1780848000000
+            }
+          ]
+        }
+        """.utf8), providerID: .minimax)
+
+        expect(snapshot.usedPercent == 6, "MiniMax headline usage should account for weekly boost")
+        expect(snapshot.extras["intervalQuotaTotalPercent"] == "200", "MiniMax interval total should account for boost")
+        expect(snapshot.extras["intervalQuotaUsedPercent"] == "4", "MiniMax interval used should match console boost-adjusted display")
+        expect(snapshot.extras["intervalQuotaRemainingPercent"] == "196", "MiniMax interval remaining should match boosted quota")
+        expect(snapshot.extras["weeklyQuotaTotalPercent"] == "300", "MiniMax weekly total should account for boost")
+        expect(snapshot.extras["weeklyQuotaUsedPercent"] == "6", "MiniMax weekly used should match console boost-adjusted display")
+        expect(snapshot.extras["weeklyQuotaRemainingPercent"] == "294", "MiniMax weekly remaining should match boosted quota")
+        expect(
+            snapshot.extras["intervalResetAt"].flatMap(DateCoding.parseISO8601) == Date(timeIntervalSince1970: 1_780_470_000),
+            "MiniMax interval reset should prefer response end_time"
+        )
+        expect(
+            snapshot.extras["weeklyResetAt"].flatMap(DateCoding.parseISO8601) == Date(timeIntervalSince1970: 1_780_848_000),
+            "MiniMax weekly reset should come from response weekly_end_time"
+        )
+        expect(snapshot.extras["weeklyRemainsTime"] == "109小时41分", "MiniMax weekly remaining time should be readable")
+    }
+
     static func claudeErrorSnapshotsAreActionable() {
         let notInstalled = ClaudeFetchError.notInstalled.snapshot
         expect(notInstalled.setupState == .notInstalled, "expected Claude install error classification")
@@ -571,7 +646,7 @@ struct TestRunner {
     }
 
     @MainActor
-    static func launchRefreshSkipsSecureProviderReads() async {
+    static func launchRefreshSkipsSecureProviderReadsButUpdatesClaude() async {
         var providers = APIKeyProviderConfig.defaults
         for index in providers.indices {
             providers[index].isEnabled = true
@@ -597,7 +672,7 @@ struct TestRunner {
         let requestedProviders = await balanceProvider.requestedProviderIDs()
         let claudeFetchCount = await claudeFetchCounter.value()
         expect(requestedProviders.isEmpty, "launch refresh should skip secure providers without a ready snapshot")
-        expect(claudeFetchCount == 1, "launch refresh should include Claude in the shared cadence")
+        expect(claudeFetchCount == 1, "launch refresh should update Claude through the lightweight non-interactive path")
         expect(manager.providers.first(where: { $0.id == .claude })?.lastSnapshot?.setupState == .ready, "Claude should refresh during the shared cadence")
     }
 
@@ -655,7 +730,7 @@ struct TestRunner {
     }
 
     @MainActor
-    static func claudeAutoRefreshUsesSharedCadence() async {
+    static func claudeAutoRefreshUsesNonInteractivePath() async {
         var providers = APIKeyProviderConfig.defaults
         for index in providers.indices {
             providers[index].isEnabled = providers[index].id == .claude
@@ -686,7 +761,51 @@ struct TestRunner {
         await manager.refreshProvider(.claude, trigger: .manual)
 
         let reads = await claudeFetchRecorder.reads()
-        expect(reads == [false, false, true], "Claude launch and polling should stay non-interactive; manual refresh can ask for keychain access")
+        expect(reads == [false, false, true], "Claude launch and polling should use the lightweight non-interactive path; manual refresh may use WebKit fallback")
+    }
+
+    @MainActor
+    static func claudeAutoRefreshPreservesDOMOnlyRoutineMetrics() async {
+        var providers = APIKeyProviderConfig.defaults
+        for index in providers.indices {
+            providers[index].isEnabled = providers[index].id == .claude
+            if providers[index].id == .claude {
+                providers[index].lastSnapshot = APIBalanceSnapshot(
+                    balance: "Claude Pro",
+                    usedPercent: 12,
+                    extras: [
+                        "fiveHourUsed": "12",
+                        "sevenDayUsed": "2",
+                        "routineUsed": "1",
+                        "routineTotal": "5"
+                    ]
+                ).markedReady(actionHint: "已同步")
+            }
+        }
+
+        let manager = APIKeyManager(
+            store: MemoryAPIKeyConfigStore(file: APIKeyConfigFile(providers: providers)),
+            secretStore: MemorySecretStore(),
+            balanceProvider: CountingBalanceProvider()
+        )
+        manager.claudeFetcher = { _ in
+            APIBalanceSnapshot(
+                balance: "Claude Pro",
+                usedPercent: 8,
+                extras: [
+                    "fiveHourUsed": "8",
+                    "sevenDayUsed": "1"
+                ]
+            )
+        }
+
+        manager.load()
+        await manager.refreshProvider(.claude, trigger: .polling)
+
+        let snapshot = manager.providers.first(where: { $0.id == .claude })?.lastSnapshot
+        expect(snapshot?.extras["fiveHourUsed"] == "8", "Claude API metrics should update during lightweight polling")
+        expect(snapshot?.extras["routineUsed"] == "1", "DOM-only routine used count should survive lightweight polling")
+        expect(snapshot?.extras["routineTotal"] == "5", "DOM-only routine total should survive lightweight polling")
     }
 
     @MainActor
