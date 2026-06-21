@@ -110,7 +110,6 @@ let sizes: [(String, Int)] = [
 for (name, size) in sizes {
     try writePNG(drawIcon(size: size), to: iconset.appendingPathComponent(name))
 }
-try writePNG(drawIcon(size: 32, template: true), to: resources.appendingPathComponent("StatusIcon.png"))
 
 let process = Process()
 process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")

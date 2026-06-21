@@ -24,7 +24,6 @@ APP_INFO="$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CodexQuotaBuildTimestamp $BUILD_TIMESTAMP" "$APP_INFO" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CodexQuotaBuildTimestamp string $BUILD_TIMESTAMP" "$APP_INFO"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
-cp "$ROOT/Resources/StatusIcon.png" "$APP/Contents/Resources/StatusIcon.png"
 printf "APPL????" > "$APP/Contents/PkgInfo"
 chmod +x "$APP/Contents/MacOS/CodexQuotaBar"
 

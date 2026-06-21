@@ -120,6 +120,178 @@ private final class FullBleedHostingView<Content: View>: NSHostingView<Content> 
     }
 }
 
+/// 状态栏图标一行的数据快照（主线程组装，绘制时只读）。
+private struct StatusBarRowSpec {
+    let label: String
+    let labelColor: NSColor
+    let fiveHour: Int?
+    let weekly: Int?
+}
+
+/// 状态栏图标渲染器：纯函数式，用 NSImage(size:flipped:drawingHandler:) 惰性绘制，
+/// 每块屏幕按自身倍率渲染（Retina 锐利）；动态色（labelColor）在绘制时按当前外观解析。
+private enum StatusBarIconRenderer {
+    private struct Layout {
+        let labelFont: NSFont
+        let numberFont: NSFont
+        let barWidth: CGFloat
+        let barHeight: CGFloat
+        let innerGap: CGFloat
+        let groupGap: CGFloat
+        let rowCenters: [CGFloat]
+        let textOffset: CGFloat
+        let dividerInset: CGFloat
+    }
+
+    /// 额度状态色（进度条填充）：<20 红、<50 黄、其余绿；无数据中性灰。
+    static func quotaColor(_ percent: Int?) -> NSColor {
+        guard let p = percent else { return NSColor(srgbRed: 0.55, green: 0.55, blue: 0.58, alpha: 1) }
+        if p < 20 { return NSColor(srgbRed: 0.96, green: 0.37, blue: 0.31, alpha: 1) }
+        if p < 50 { return NSColor(srgbRed: 0.98, green: 0.78, blue: 0.22, alpha: 1) }
+        return NSColor(srgbRed: 0.30, green: 0.85, blue: 0.47, alpha: 1)
+    }
+
+    static func numberText(_ percent: Int?) -> String {
+        percent.map { "\(min(100, max(0, $0)))%" } ?? "--"
+    }
+
+    /// 1-3 行自适应：每行 名字 + 5小时表 +（可选）每周表，各列定宽对齐。
+    static func render(rows: [StatusBarRowSpec], showsWeekly: Bool, height h: CGFloat) -> NSImage {
+        let layout = layout(rowCount: rows.count, height: h)
+        let labelColW = rows
+            .map { ($0.label as NSString).size(withAttributes: [.font: layout.labelFont]).width }
+            .max() ?? 0
+        let numberColW = ("100%" as NSString).size(withAttributes: [.font: layout.numberFont]).width
+        let bar1X = labelColW + layout.innerGap
+        let num1X = bar1X + layout.barWidth + layout.innerGap
+        let bar2X = num1X + numberColW + layout.groupGap
+        let num2X = bar2X + layout.barWidth + layout.innerGap
+        let total = showsWeekly ? num2X + numberColW : num1X + numberColW
+
+        return NSImage(size: NSSize(width: total, height: h), flipped: false) { _ in
+            if showsWeekly {
+                // 组间细分隔线（贯穿两行，标记 5小时组 / 每周组 的边界）
+                NSColor.labelColor.withAlphaComponent(0.22).setFill()
+                NSRect(
+                    x: num1X + numberColW + layout.groupGap / 2,
+                    y: layout.dividerInset,
+                    width: 0.8,
+                    height: h - layout.dividerInset * 2
+                ).fill()
+            }
+            for (row, cy) in zip(rows, layout.rowCenters) {
+                drawRow(
+                    row,
+                    layout: layout,
+                    cy: cy,
+                    bar1X: bar1X,
+                    num1X: num1X,
+                    bar2X: bar2X,
+                    num2X: num2X,
+                    numberColW: numberColW,
+                    showsWeekly: showsWeekly
+                )
+            }
+            return true
+        }
+    }
+
+    private static func layout(rowCount: Int, height h: CGFloat) -> Layout {
+        if rowCount <= 1 {
+            let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+            return Layout(
+                labelFont: labelFont,
+                numberFont: .monospacedDigitSystemFont(ofSize: 9, weight: .semibold),
+                barWidth: 32,
+                barHeight: 4.2,
+                innerGap: 4,
+                groupGap: 8,
+                rowCenters: [h * 0.50],
+                textOffset: labelFont.pointSize * 0.55,
+                dividerInset: 4
+            )
+        }
+        if rowCount == 2 {
+            let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold)
+            return Layout(
+                labelFont: labelFont,
+                numberFont: .monospacedDigitSystemFont(ofSize: 8.5, weight: .semibold),
+                barWidth: 30,
+                barHeight: 4,
+                innerGap: 4,
+                groupGap: 8,
+                rowCenters: [h * 0.72, h * 0.28],
+                textOffset: 4.5,
+                dividerInset: 3
+            )
+        }
+
+        let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 6.8, weight: .bold)
+        return Layout(
+            labelFont: labelFont,
+            numberFont: .monospacedDigitSystemFont(ofSize: 6.8, weight: .semibold),
+            barWidth: 24,
+            barHeight: 3,
+            innerGap: 3,
+            groupGap: 6,
+            rowCenters: [h * 0.80, h * 0.50, h * 0.20],
+            textOffset: labelFont.pointSize * 0.55,
+            dividerInset: 2
+        )
+    }
+
+    private static func drawRow(_ row: StatusBarRowSpec, layout: Layout, cy: CGFloat,
+                                bar1X: CGFloat, num1X: CGFloat, bar2X: CGFloat, num2X: CGFloat,
+                                numberColW: CGFloat, showsWeekly: Bool) {
+        // 名字（左对齐 x=0，品牌/任务色）
+        let la: [NSAttributedString.Key: Any] = [.font: layout.labelFont, .foregroundColor: row.labelColor]
+        (row.label as NSString).draw(at: NSPoint(x: 0, y: cy - layout.textOffset), withAttributes: la)
+
+        drawMeter(cy: cy, layout: layout, barX: bar1X, numX: num1X, numberColW: numberColW, percent: row.fiveHour)
+        if showsWeekly {
+            drawMeter(cy: cy, layout: layout, barX: bar2X, numX: num2X, numberColW: numberColW, percent: row.weekly)
+        }
+    }
+
+    /// 单条进度表：胶囊轨道 + 填充（长度=剩余量、颜色=额度状态色）+ 右对齐百分比。
+    /// 数字默认中性色（颜色信息由进度条承担），仅剩余 <20% 时变红警示。
+    private static func drawMeter(cy: CGFloat, layout: Layout, barX: CGFloat, numX: CGFloat,
+                                  numberColW: CGFloat, percent: Int?) {
+        let barY = cy - layout.barHeight / 2
+
+        NSColor.labelColor.withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: NSRect(x: barX, y: barY, width: layout.barWidth, height: layout.barHeight),
+                     xRadius: layout.barHeight / 2, yRadius: layout.barHeight / 2).fill()
+
+        if let p = percent {
+            let frac = CGFloat(min(100, max(0, p))) / 100
+            if frac > 0 {
+                quotaColor(p).setFill()
+                NSBezierPath(
+                    roundedRect: NSRect(
+                        x: barX,
+                        y: barY,
+                        width: max(layout.barHeight, layout.barWidth * frac),
+                        height: layout.barHeight
+                    ),
+                    xRadius: layout.barHeight / 2,
+                    yRadius: layout.barHeight / 2
+                ).fill()
+            }
+        }
+
+        let numColor: NSColor = if let p = percent {
+            p < 20 ? quotaColor(p) : NSColor.labelColor.withAlphaComponent(0.85)
+        } else {
+            NSColor.labelColor.withAlphaComponent(0.45)
+        }
+        let na: [NSAttributedString.Key: Any] = [.font: layout.numberFont, .foregroundColor: numColor]
+        let ns = numberText(percent) as NSString
+        let nw = ns.size(withAttributes: na).width
+        ns.draw(at: NSPoint(x: numX + numberColW - nw, y: cy - layout.textOffset), withAttributes: na)
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
@@ -136,6 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
     private let memoryMonitor = MemoryMonitorController()
     private let trafficLight = CodexTrafficLightController()
     private let claudeActivity = ClaudeActivityController()
+    /// 仅在 Codex 执行任务(running)时运行的呼吸定时器；任务结束立即停，空闲零开销。
+    private var statusBreathTimer: Timer?
     private var didPerformStartupImport = false
     private var startupImportReason = "not_evaluated"
     private var didAccessClaudeSafeStorageDuringLaunch = false
@@ -195,7 +369,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem?.button?.target = self
         statusItem?.button?.action = #selector(togglePopover)
+        CompactStatusBarDefaults.applyCompactMigration()
         configureStatusButton()
+
+        // 深/浅色菜单栏切换时重绘图标（数字/轨道用语义色，需跟随外观）。
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.configureStatusButton() }
+        }
+
+        // Codex 红绿灯内嵌进主图标：常驻监听任务状态，状态一变就重绘并按需启停呼吸。
+        trafficLight.onModeChange = { [weak self] in self?.statusModeDidChange() }
+        trafficLight.setEmbeddedActive(true)
 
         applyStatusBarVisibility()
 
@@ -231,11 +418,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
     }
 
     private func updatePopoverSize() {
+        let routineTotal = Int(apiKeyManager.providers.first(where: { $0.id == .claude })?
+            .lastSnapshot?.extras["routineTotal"] ?? "") ?? 0
         popover.contentSize = NSSize(
-            width: PanelMetrics.width,
-            height: PanelMetrics.height(
-                codexSlotCount: manager.slots.count,
-                apiProviderCount: apiKeyManager.providers.count,
+            width: PanelMetrics.menuWidth,
+            height: PanelMetrics.menuHeight(
+                codexRowCounts: manager.slots.map { max(1, $0.lastSnapshot?.quotaWindows.count ?? 0) },
+                claudeRows: 2 + (routineTotal > 0 ? 1 : 0),
+                hasMiniMax: apiKeyManager.providers.contains(where: { $0.id == .minimax }),
+                balanceRows: [APIKeyProviderID.deepseek, .comfly]
+                    .filter { id in apiKeyManager.providers.contains(where: { $0.id == id }) }.count,
                 hasError: manager.lastError != nil
             )
         )
@@ -243,71 +435,183 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
 
     private func configureStatusButton() {
         guard let button = statusItem?.button else { return }
-        button.image = nil
         button.contentTintColor = nil
-        button.attributedTitle = makeStatusBarTitle()
+        let toolTip = makeStatusBarToolTip()
+        let image = makeStatusBarImage()
+        image.accessibilityDescription = toolTip
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.toolTip = toolTip
+        button.setAccessibilityLabel(toolTip)
     }
 
-    private func makeStatusBarTitle() -> NSAttributedString {
-        let title = NSMutableAttributedString()
-        let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
-        ]
-        let separatorAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
-        let dotAttributes: (NSColor) -> [NSAttributedString.Key: Any] = { color in
-            [
-                .font: NSFont.systemFont(ofSize: 8.5, weight: .bold),
-                .foregroundColor: color,
-                .baselineOffset: 0.5
-            ]
+    // MARK: - 状态栏图标（上下两行，整行随任务态变色）
+
+    // 默认/空闲用各自品牌色；执行中→黄、报错→红、任务结束→回品牌色。
+    private static let codexBrandColor = NSColor(srgbRed: 0.30, green: 0.72, blue: 0.88, alpha: 1)   // Codex 青
+    private static let claudeBrandColor = NSColor(srgbRed: 0.93, green: 0.46, blue: 0.30, alpha: 1)  // Claude 橙
+    private static let minimaxBrandColor = NSColor(srgbRed: 0.49, green: 0.23, blue: 0.93, alpha: 1) // MiniMax 紫
+    private static let statusBusyColor = NSColor(srgbRed: 0.95, green: 0.78, blue: 0.22, alpha: 1)   // 执行中 黄
+    private static let statusErrorColor = NSColor(srgbRed: 0.95, green: 0.37, blue: 0.31, alpha: 1)  // 报错 红
+
+    /// Codex 名字颜色：默认品牌色，执行中→黄（带呼吸明暗），报错→红，结束→回品牌色。
+    private func codexLabelColor(breathAlpha: CGFloat) -> NSColor {
+        switch trafficLight.mode {
+        case .running: return Self.statusBusyColor.withAlphaComponent(breathAlpha)
+        case .failure: return Self.statusErrorColor
+        case .idle, .success: return Self.codexBrandColor
         }
-
-        title.append(NSAttributedString(
-            string: "●",
-            attributes: dotAttributes(NSColor(calibratedRed: 0.07, green: 0.66, blue: 0.78, alpha: 1.0))
-        ))
-        title.append(NSAttributedString(
-            string: " \(statusBarPlatformText(name: "Codex", percent: manager.sessionRemaining, resetAt: manager.sessionResetAt))",
-            attributes: textAttributes
-        ))
-        title.append(NSAttributedString(string: " | ", attributes: separatorAttributes))
-        title.append(NSAttributedString(
-            string: "●",
-            attributes: dotAttributes(NSColor(calibratedRed: 0.88, green: 0.35, blue: 0.17, alpha: 1.0))
-        ))
-        title.append(NSAttributedString(
-            string: " \(statusBarPlatformText(name: "Claude", percent: apiKeyManager.claudeFiveHourRemaining, resetAt: apiKeyManager.claudeFiveHourResetAt))",
-            attributes: textAttributes
-        ))
-        return title
     }
 
-    private func statusBarPlatformText(name: String, percent: Int?, resetAt: Date?) -> String {
-        "\(name) \(statusBarPercentText(percent)) \(statusBarRemainingText(resetAt))"
+    /// 呼吸明暗系数（0.45~1.0，周期 ~1.8s），由连续时间驱动，免受定时器抖动影响。
+    private static func statusBreathAlpha(at date: Date) -> CGFloat {
+        let phase = sin(date.timeIntervalSinceReferenceDate * 2 * .pi / 1.8)
+        return 0.45 + 0.55 * (0.5 + 0.5 * phase)
     }
 
-    private func statusBarPercentText(_ percent: Int?) -> String {
-        guard let percent else { return "--" }
-        return "\(min(100, max(0, percent)))%"
+    /// 红绿灯任务态变化时调用：running 期间启动 ~10fps 呼吸定时器，其余状态停掉（空闲零开销）。
+    private func statusModeDidChange() {
+        if trafficLight.mode == .running {
+            if statusBreathTimer == nil {
+                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                    Task { @MainActor in self?.configureStatusButton() }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                statusBreathTimer = timer
+            }
+        } else {
+            statusBreathTimer?.invalidate()
+            statusBreathTimer = nil
+        }
+        configureStatusButton()
+    }
+
+
+    // 布局常量
+
+    /// 组装状态栏图标：主线程取数据快照，交给 StatusBarIconRenderer 用 drawingHandler 惰性绘制
+    /// （每块屏幕按自身倍率渲染，Retina/外接屏都锐利；labelColor 等动态色在绘制时按当前外观解析）。
+    private func makeStatusBarImage() -> NSImage {
+        // running 时按连续时间取呼吸明暗；其余状态不透明（且无定时器）。
+        let breathAlpha: CGFloat = trafficLight.mode == .running ? Self.statusBreathAlpha(at: Date()) : 1
+        let rows = statusBarRows(breathAlpha: breathAlpha)
+        let showsWeekly = UserDefaults.standard.object(forKey: "statusBarShowsWeekly") as? Bool ?? true
+        return StatusBarIconRenderer.render(rows: rows, showsWeekly: showsWeekly,
+                                            height: NSStatusBar.system.thickness)
+    }
+
+    private func statusBarRows(breathAlpha: CGFloat) -> [StatusBarRowSpec] {
+        CompactStatusBarDefaults.visibleQuotaProviders().map { provider in
+            switch provider {
+            case .codex:
+                // Codex：名字接红绿灯任务态（默认品牌青/执行黄+呼吸/报错红）
+                return StatusBarRowSpec(
+                    label: "Codex",
+                    labelColor: codexLabelColor(breathAlpha: breathAlpha),
+                    fiveHour: manager.sessionRemaining,
+                    weekly: manager.weeklyRemaining
+                )
+            case .claude:
+                // Claude：名字固定品牌橙（无可靠任务信号）
+                return StatusBarRowSpec(
+                    label: "Claude",
+                    labelColor: Self.claudeBrandColor,
+                    fiveHour: apiKeyManager.claudeFiveHourRemaining,
+                    weekly: apiKeyManager.claudeSevenDayRemaining
+                )
+            case .minimax:
+                return StatusBarRowSpec(
+                    label: "MiniMax",
+                    labelColor: Self.minimaxBrandColor,
+                    fiveHour: minimaxRemaining(
+                        remainingKey: "intervalRemainingPercent",
+                        totalKey: "intervalQuotaTotalPercent",
+                        usedKey: "intervalQuotaUsedPercent"
+                    ),
+                    weekly: minimaxRemaining(
+                        remainingKey: "weeklyRemainingPercent",
+                        totalKey: "weeklyQuotaTotalPercent",
+                        usedKey: "weeklyQuotaUsedPercent"
+                    )
+                )
+            }
+        }
+    }
+
+    private func makeStatusBarToolTip() -> String {
+        CompactStatusBarDefaults.visibleQuotaProviders().map { provider in
+            switch provider {
+            case .codex:
+                return statusBarPlatformText(
+                    name: "Codex",
+                    fiveHour: manager.sessionRemaining,
+                    weekly: manager.weeklyRemaining,
+                    resetAt: manager.sessionResetAt
+                )
+            case .claude:
+                return statusBarPlatformText(
+                    name: "Claude",
+                    fiveHour: apiKeyManager.claudeFiveHourRemaining,
+                    weekly: apiKeyManager.claudeSevenDayRemaining,
+                    resetAt: apiKeyManager.claudeFiveHourResetAt
+                )
+            case .minimax:
+                return statusBarPlatformText(
+                    name: "MiniMax",
+                    fiveHour: minimaxRemaining(
+                        remainingKey: "intervalRemainingPercent",
+                        totalKey: "intervalQuotaTotalPercent",
+                        usedKey: "intervalQuotaUsedPercent"
+                    ),
+                    weekly: minimaxRemaining(
+                        remainingKey: "weeklyRemainingPercent",
+                        totalKey: "weeklyQuotaTotalPercent",
+                        usedKey: "weeklyQuotaUsedPercent"
+                    ),
+                    resetAt: minimaxResetAt(key: "intervalResetAt")
+                )
+            }
+        }.joined(separator: "\n")
+    }
+
+    private func statusBarPlatformText(name: String, fiveHour: Int?, weekly: Int?, resetAt: Date?) -> String {
+        "\(name)  5小时 \(CompactStatusBarDisplay.percentText(fiveHour)) · 每周 \(CompactStatusBarDisplay.percentText(weekly)) · \(statusBarRemainingText(resetAt))"
+    }
+
+    private func minimaxRemaining(remainingKey: String, totalKey: String, usedKey: String) -> Int? {
+        guard let snapshot = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot else {
+            return nil
+        }
+        return MiniMaxQuotaDisplay.window(
+            extras: snapshot.extras,
+            remainingKey: remainingKey,
+            totalKey: totalKey,
+            usedKey: usedKey,
+            fallbackUsedPercent: snapshot.usedPercent
+        ).barPercent
+    }
+
+    private func minimaxResetAt(key: String) -> Date? {
+        guard let iso = apiKeyManager.providers.first(where: { $0.id == .minimax })?.lastSnapshot?.extras[key] else {
+            return nil
+        }
+        return DateCoding.parseISO8601(iso)
     }
 
     private func statusBarRemainingText(_ date: Date?) -> String {
-        guard let date else { return "--" }
+        guard let date else { return "重置 --" }
         let remaining = max(0, Int(date.timeIntervalSinceNow))
+        let prefix = "重置 "
         if remaining < 60 {
-            return "\(remaining)s"
+            return "\(prefix)\(remaining)s"
         }
 
         let hours = remaining / 3_600
         let minutes = (remaining % 3_600) / 60
         if hours > 0 {
-            return minutes > 0 ? "\(hours)h\(minutes)m" : "\(hours)h"
+            return minutes > 0 ? "\(prefix)\(hours)h\(minutes)m" : "\(prefix)\(hours)h"
         }
-        return "\(minutes)m"
+        return "\(prefix)\(minutes)m"
     }
 
     private func makeStatusIcon(isWarning: Bool) -> NSImage {
@@ -418,9 +722,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPo
     }
 
     private func applyStatusBarVisibility() {
-        memoryMonitor.setVisible(UserDefaults.standard.object(forKey: "showMemoryIndicator") as? Bool ?? true)
-        trafficLight.setVisible(UserDefaults.standard.object(forKey: "showCodexTrafficLight") as? Bool ?? true)
+        memoryMonitor.setVisible(CompactStatusBarDefaults.isMemoryIndicatorVisible())
+        trafficLight.setVisible(CompactStatusBarDefaults.isTrafficLightVisible())
         refreshActivityConsumers()
+        configureStatusButton()   // “每周进度”开关切换后立即重绘主图标
     }
 
     @objc private func showAPIKeys() {
@@ -765,155 +1070,301 @@ private struct MonitorPanelView: View {
     let toggleDesktopWidget: () -> Void
     let openDataFolder: () -> Void
     let quit: () -> Void
-    @State private var copiedProviderID: APIKeyProviderID?
-    @State private var copyFeedbackToken = 0
+    private static let updatedAtFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
 
     private var panelHeight: CGFloat {
-        PanelMetrics.height(
-            codexSlotCount: manager.slots.count,
-            apiProviderCount: apiKeyManager.providers.count,
+        PanelMetrics.menuHeight(
+            codexRowCounts: manager.slots.map { max(1, $0.lastSnapshot?.quotaWindows.count ?? 0) },
+            claudeRows: 2 + (claudeRoutine != nil ? 1 : 0),
+            hasMiniMax: apiProvider(.minimax) != nil,
+            balanceRows: (apiProvider(.deepseek) != nil ? 1 : 0) + (apiProvider(.comfly) != nil ? 1 : 0),
             hasError: manager.lastError != nil
         )
     }
 
+    // 原生菜单风：纯平面、无渐变/光晕/倒计时圆环、无 TimelineView——只随 @Published 数据变化重绘。
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { _ in
-            ZStack {
-                Color(red: 0.03, green: 0.03, blue: 0.05)  // opaque base — was a behind-window blur that the ~0.97 gradient covered anyway (live backdrop blur = constant GPU cost)
-                ZStack {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.05, green: 0.05, blue: 0.08).opacity(0.96),
-                            Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.98)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.03, green: 0.64, blue: 0.76).opacity(0.20),
-                            .clear
-                        ],
-                        center: .topLeading,
-                        startRadius: 24,
-                        endRadius: 260
-                    )
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.87, green: 0.34, blue: 0.14).opacity(0.14),
-                            .clear
-                        ],
-                        center: .topTrailing,
-                        startRadius: 18,
-                        endRadius: 220
-                    )
-                }
+        VStack(spacing: 0) {
+            menuHeader
+            Rectangle().fill(Color.white.opacity(0.10)).frame(height: 0.5)
 
-                VStack(spacing: 0) {
-                    header
-
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(spacing: 8) {
-                            if let lastError = manager.lastError {
-                                MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
-                            }
-
-                            SubscriptionCardStack(
-                                manager: manager,
-                                apiKeyManager: apiKeyManager,
-                                refreshCadence: refreshCadence,
-                                memoryMonitor: memoryMonitor,
-                                trafficLight: trafficLight,
-                                claudeActivity: claudeActivity,
-                                importAccount: importAccount
-                            )
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 12)
-                        .padding(.bottom, 8)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let lastError = manager.lastError {
+                        MessageStrip(text: lastError, systemImage: "exclamationmark.triangle.fill")
+                            .padding(.bottom, 4)
                     }
-                    .frame(maxHeight: PanelMetrics.scrollHeight(for: panelHeight))
-
-                    copyRow
-                    actionBar
+                    codexSections
+                    sectionDivider
+                    claudeSection
+                    minimaxSection
+                    if let provider = apiProvider(.deepseek) {
+                        sectionDivider
+                        balanceRow(provider)
+                    }
+                    if let provider = apiProvider(.comfly) {
+                        sectionDivider
+                        balanceRow(provider)
+                    }
+                    sectionDivider
+                    memoryRow
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
+
+            Rectangle().fill(Color.white.opacity(0.10)).frame(height: 0.5)
+            actionBar
         }
-        .frame(width: PanelMetrics.width, height: panelHeight)
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(Color.white.opacity(0.10), lineWidth: 0.8)
-        )
-        .shadow(color: .black.opacity(0.42), radius: 18, y: 10)
+        .frame(width: PanelMetrics.menuWidth, height: panelHeight)
+        .background(Color(red: 0.114, green: 0.114, blue: 0.125))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .preferredColorScheme(.dark)
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            MonitorHeaderIcon()
-                .scaleEffect(0.88)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("订阅余额")
-                    .font(.custom("Avenir Next Demi Bold", size: 15))
-                    .tracking(0.2)
-                    .foregroundStyle(.white)
-                Text(statusSubtitle)
-                    .font(.custom("Avenir Next Regular", size: 9.5))
-                    .foregroundStyle(.white.opacity(0.48))
-                BuildIdentityView(compact: true)
-            }
-
+    private var menuHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("订阅余额")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.94))
             Spacer(minLength: 0)
+            Text(updatedAtText)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.42))
         }
         .padding(.horizontal, 14)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
+        .padding(.vertical, 9)
     }
 
-    private var statusSubtitle: String {
-        if manager.isRefreshing || apiKeyManager.isRefreshing { return "正在刷新..." }
-        if manager.slots.isEmpty { return "尚未导入账号" }
-        return "5小时与周额度实时监控"
+    private var updatedAtText: String {
+        if manager.isRefreshing || apiKeyManager.isRefreshing { return "刷新中…" }
+        let dates = manager.slots.compactMap { $0.lastSnapshot?.updatedAt }
+            + apiKeyManager.providers.compactMap { $0.lastSnapshot?.updatedAt }
+        guard let latest = dates.max() else { return "尚未刷新" }
+        return "更新于 \(Self.updatedAtFormatter.string(from: latest))"
     }
 
-    private var copyRow: some View {
+    private var sectionDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.07))
+            .frame(height: 0.5)
+            .padding(.vertical, 6)
+    }
+
+    /// 区头：名字（品牌色）+ 套餐（左侧小字）+ 任务状态；右侧一条聚合说明（重置时间等），
+    /// 行内不再带说明文字——降噪的关键。
+    @ViewBuilder
+    private func sectionHeader(name: String, color: Color, plan: String?,
+                               detail: String? = nil, status: (label: String, color: Color)? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(name)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(color)
+            if let plan, !plan.isEmpty {
+                Text(plan)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .lineLimit(1)
+            }
+            if let status {
+                Text("● \(status.label)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(status.color)
+            }
+            Spacer(minLength: 0)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.white.opacity(0.38))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+        .padding(.bottom, 3)
+    }
+
+    @ViewBuilder
+    private var codexSections: some View {
+        if manager.slots.isEmpty {
+            HStack {
+                Text("尚未导入 Codex 账号")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+                Spacer(minLength: 0)
+                Button("导入", action: importAccount)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+            }
+            .frame(height: 24)
+        } else {
+            ForEach(Array(manager.slots.enumerated()), id: \.element.id) { index, slot in
+                if index > 0 { sectionDivider }
+                codexSection(slot)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func codexSection(_ slot: AccountSlot) -> some View {
+        let taskStatus: (label: String, color: Color)? = switch trafficLight.mode {
+        case .running: ("执行中", Color(nsColor: trafficLight.mode.color))
+        case .failure: ("异常", Color(nsColor: trafficLight.mode.color))
+        case .idle, .success: nil
+        }
+        sectionHeader(name: "Codex", color: Color(red: 0.30, green: 0.72, blue: 0.88),
+                      plan: slot.lastSnapshot?.extras["planType"].map(displayPlanName),
+                      detail: codexResetSummary(slot),
+                      status: taskStatus)
+        if let snap = slot.lastSnapshot, !snap.quotaWindows.isEmpty {
+            ForEach(snap.quotaWindows) { window in
+                MenuMeterRow(label: menuWindowLabel(window), percent: window.remainingPercent)
+                    .help("\(window.title) · \(QuotaFormatters.absoluteResetText(window.resetAt))")
+            }
+        } else {
+            Text("暂无数据")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.35))
+                .frame(height: 16)
+        }
+    }
+
+    @ViewBuilder
+    private var claudeSection: some View {
+        let snapshot = apiProvider(.claude)?.lastSnapshot
+        let resets = [menuShortReset(snapshot?.extras["fiveHourResetsAt"]),
+                      menuShortReset(snapshot?.extras["sevenDayResetsAt"])].compactMap(\.self)
+        sectionHeader(name: "Claude", color: Color(hex: "#E05A2B") ?? .orange, plan: claudePlan,
+                      detail: resets.isEmpty ? nil : resets.joined(separator: " / "))
+        MenuMeterRow(label: "5小时", percent: claudeUsedRemaining("fiveHourUsed"))
+            .help("5小时 · \(menuAbsoluteReset(snapshot?.extras["fiveHourResetsAt"]))")
+        MenuMeterRow(label: "每周", percent: claudeUsedRemaining("sevenDayUsed"))
+            .help("每周 · \(menuAbsoluteReset(snapshot?.extras["sevenDayResetsAt"]))")
+        if let r = claudeRoutine {
+            MenuMeterRow(label: "Routine",
+                         percent: max(0, min(100, Int((Double(r.total - r.used) / Double(r.total) * 100).rounded()))),
+                         valueText: "\(r.used)/\(r.total)")
+                .help("Routine 今日已用 \(r.used)/\(r.total) 次")
+        }
+    }
+
+    @ViewBuilder
+    private var minimaxSection: some View {
+        if let provider = apiProvider(.minimax) {
+            let snapshot = provider.lastSnapshot
+            let interval = snapshot.map { minimaxWindowDisplay($0, window: .interval) }
+            let weekly = snapshot.map { minimaxWindowDisplay($0, window: .weekly) }
+            sectionDivider
+            sectionHeader(name: "MiniMax", color: Color(hex: provider.colorHex) ?? .purple,
+                          plan: minimaxPlan(snapshot),
+                          detail: interval.flatMap { i in weekly.map { w in "总额 \(i.meterLabel) / \(w.meterLabel)" } })
+            MenuMeterRow(label: "5小时", percent: interval?.barPercent)
+                .help(interval.map { "5小时 · \($0.summary)" } ?? "5小时")
+            MenuMeterRow(label: "每周", percent: weekly?.barPercent)
+                .help(weekly.map { "每周 · \($0.summary)" } ?? "每周")
+        }
+    }
+
+    @ViewBuilder
+    private func balanceRow(_ provider: APIKeyProviderConfig) -> some View {
+        MenuMeterRow(label: provider.displayName,
+                     percent: balanceRemaining(provider),
+                     valueText: balanceText(provider),
+                     labelColor: Color(hex: provider.colorHex) ?? .white.opacity(0.8),
+                     emphasizeLabel: true)
+    }
+
+    private var memoryRow: some View {
         HStack(spacing: 8) {
-            ForEach(apiKeyManager.providers) { provider in
-                FloatingCopyButton(
-                    title: provider.displayName,
-                    color: Color(hex: provider.colorHex) ?? .white.opacity(0.6),
-                    isCopied: copiedProviderID == provider.id,
-                    isEnabled: apiKeyManager.canCopyPrimaryValue(providerID: provider.id),
-                    action: { copyKey(provider.id) }
-                )
+            Text("内存")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+            Spacer(minLength: 0)
+            if let s = memoryMonitor.current {
+                Circle()
+                    .fill(Color(nsColor: memoryPressureColor(s.pressureLevel)))
+                    .frame(width: 7, height: 7)
+                Text(String(format: "%.1f / %.0f GB", s.usedBytes / 1_073_741_824, s.physicalBytes / 1_073_741_824))
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.85))
+            } else {
+                Text("--")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.4))
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
+        .frame(height: 18)
     }
 
-    private func copyKey(_ providerID: APIKeyProviderID) {
-        let value = apiKeyManager.primaryCopyValue(providerID: providerID)
-        guard !value.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        showCopiedFeedback(for: providerID)
+    private func apiProvider(_ id: APIKeyProviderID) -> APIKeyProviderConfig? {
+        apiKeyManager.providers.first(where: { $0.id == id })
     }
 
-    private func showCopiedFeedback(for providerID: APIKeyProviderID) {
-        copyFeedbackToken &+= 1
-        let token = copyFeedbackToken
-        copiedProviderID = nil
-        DispatchQueue.main.async {
-            copiedProviderID = providerID
+    private func claudeUsedRemaining(_ key: String) -> Int? {
+        guard let val = apiProvider(.claude)?.lastSnapshot?.extras[key], let used = Int(val) else { return nil }
+        return max(0, min(100, 100 - used))
+    }
+
+    private var claudePlan: String? {
+        guard let snapshot = apiProvider(.claude)?.lastSnapshot else { return "未同步" }
+        return snapshot.extras["planName"].map(displayPlanName) ?? snapshot.extras["billingStatus"]
+    }
+
+    private var claudeRoutine: (used: Int, total: Int)? {
+        guard let snapshot = apiProvider(.claude)?.lastSnapshot,
+              let total = Int(snapshot.extras["routineTotal"] ?? ""), total > 0 else { return nil }
+        return (Int(snapshot.extras["routineUsed"] ?? "0") ?? 0, total)
+    }
+
+    private func minimaxPlan(_ snapshot: APIBalanceSnapshot?) -> String? {
+        guard let snapshot else { return "未配置" }
+        if let planName = snapshot.extras["planName"]?.trimmingCharacters(in: .whitespacesAndNewlines), !planName.isEmpty {
+            return displayPlanName(planName)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
-            if copyFeedbackToken == token {
-                copiedProviderID = nil
+        return "Token Plan 共享额度"
+    }
+
+    private func menuAbsoluteReset(_ iso: String?) -> String {
+        guard let iso, let date = DateCoding.parseISO8601(iso) else { return "--" }
+        return QuotaFormatters.absoluteResetText(date)
+    }
+
+    /// 短重置文案（区头聚合用）：去掉"重置"后缀，如 "明天 00:05"。
+    private func menuShortReset(_ iso: String?) -> String? {
+        guard let iso, let date = DateCoding.parseISO8601(iso) else { return nil }
+        return QuotaFormatters.absoluteResetText(date).replacingOccurrences(of: " 重置", with: "")
+    }
+
+    /// Codex 区头聚合重置时间："明天 00:05 / 周四 19:05"（仅主 5小时/每周窗口，不含 Spark）。
+    private func codexResetSummary(_ slot: AccountSlot) -> String? {
+        guard let snap = slot.lastSnapshot else { return nil }
+        let main = snap.quotaWindows.filter { !$0.title.hasPrefix("Spark") }
+        let parts = [main.first(where: { $0.kind == .session }), main.first(where: { $0.kind == .weekly })]
+            .compactMap { window -> String? in
+                guard let resetAt = window?.resetAt else { return nil }
+                return QuotaFormatters.absoluteResetText(resetAt).replacingOccurrences(of: " 重置", with: "")
             }
+        return parts.isEmpty ? nil : parts.joined(separator: " / ")
+    }
+
+    private func balanceRemaining(_ provider: APIKeyProviderConfig) -> Int? {
+        guard let snapshot = provider.lastSnapshot else { return nil }
+        switch provider.id {
+        case .deepseek:
+            return Int(snapshot.extras["remainingPercent"] ?? "") ?? max(0, 100 - snapshot.usedPercent)
+        default:
+            return max(0, 100 - snapshot.usedPercent)
         }
+    }
+
+    private func balanceText(_ provider: APIKeyProviderConfig) -> String {
+        guard let snapshot = provider.lastSnapshot else { return "未配置" }
+        if provider.id == .comfly { return snapshot.extras["balanceYuan"] ?? snapshot.balance }
+        return snapshot.balance
     }
 
     private var actionBarDivider: some View {
@@ -948,18 +1399,117 @@ private struct MonitorPanelView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(
-            LinearGradient(
-                colors: [Color.white.opacity(0.05), Color.black.opacity(0.16)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+    }
+}
+
+/// 原生菜单风的一行进度表：标签 + 胶囊条（额度状态色）+ 数值（默认百分比，可覆写成余额/次数）。
+/// 纯静态绘制；数字默认中性色，仅剩余 <20% 变红（与菜单栏图标同一套语言）。
+private struct MenuMeterRow: View {
+    let label: String
+    let percent: Int?
+    var valueText: String? = nil
+    var labelColor: Color = .white.opacity(0.45)
+    var emphasizeLabel: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: emphasizeLabel ? 11.5 : 10.5, weight: emphasizeLabel ? .semibold : .regular))
+                .foregroundStyle(labelColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 56, alignment: .leading)
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.10))
+                    if let percent {
+                        Capsule()
+                            .fill(quotaTint)
+                            .frame(width: max(4, proxy.size.width * CGFloat(min(100, max(0, percent))) / 100))
+                    }
+                }
+            }
+            .frame(height: 4)
+
+            Text(valueText ?? percent.map { "\(min(100, max(0, $0)))%" } ?? "--")
+                .font(.system(size: 10.5, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(percentColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 44, alignment: .trailing)
+        }
+        .frame(height: 16)
+    }
+
+    private var quotaTint: Color {
+        guard let p = percent else { return .white.opacity(0.3) }
+        if p < 20 { return Color(red: 0.96, green: 0.37, blue: 0.31) }
+        if p < 50 { return Color(red: 0.98, green: 0.78, blue: 0.22) }
+        return Color(red: 0.30, green: 0.85, blue: 0.47)
+    }
+
+    private var percentColor: Color {
+        if let p = percent, p < 20 { return Color(red: 0.96, green: 0.37, blue: 0.31) }
+        return .white.opacity(0.85)
+    }
+}
+
+/// 菜单行里 Codex 额度窗口的短标签（Spark 窗口保留 Spark 前缀以便区分）。
+private func menuWindowLabel(_ window: QuotaWindow) -> String {
+    switch window.title {
+    case "Spark 5小时": return "Spark 5h"
+    case "Spark 每周": return "Spark 周"
+    default:
+        switch window.kind {
+        case .session: return "5小时"
+        case .weekly: return "每周"
+        case .credits: return "余额"
+        case .unknown: return window.title
+        }
     }
 }
 
 private enum PanelMetrics {
     static let width: CGFloat = 344
+    static let menuWidth: CGFloat = 292
+
+    /// 原生菜单风弹窗高度：按各分区行数累加（行高/分隔线与 MonitorPanelView 布局保持一致）。
+    static func menuHeight(codexRowCounts: [Int], claudeRows: Int, hasMiniMax: Bool,
+                           balanceRows: Int, hasError: Bool) -> CGFloat {
+        let headerH: CGFloat = 36
+        let actionBarH: CGFloat = 46
+        let scrollPadding: CGFloat = 16
+        let sectionHeaderH: CGFloat = 20
+        let rowH: CGFloat = 16
+        let dividerH: CGFloat = 12.5
+
+        var content: CGFloat = 0
+        var sections = 0
+        if codexRowCounts.isEmpty {
+            content += 24
+            sections += 1
+        } else {
+            for count in codexRowCounts {
+                content += sectionHeaderH + CGFloat(count) * rowH
+                sections += 1
+            }
+        }
+        content += sectionHeaderH + CGFloat(claudeRows) * rowH
+        sections += 1
+        if hasMiniMax {
+            content += sectionHeaderH + 2 * rowH
+            sections += 1
+        }
+        content += CGFloat(balanceRows) * rowH
+        sections += balanceRows
+        content += 18   // 内存行
+        sections += 1
+        content += CGFloat(max(0, sections - 1)) * dividerH
+        if hasError { content += 40 }
+        return headerH + scrollPadding + content + actionBarH
+    }
     static let heightScale: CGFloat = 1.0
     static let minHeight: CGFloat = 320
     static let maxHeight: CGFloat = 760
@@ -3333,8 +3883,12 @@ private struct APIKeySettingsView: View {
     @ObservedObject var quotaManager: QuotaManager
     var openDataFolder: () -> Void = {}
     var applyStatusBarVisibility: () -> Void = {}
-    @AppStorage("showCodexTrafficLight") private var showTrafficLight = true
-    @AppStorage("showMemoryIndicator") private var showMemory = true
+    @AppStorage("showCodexTrafficLight") private var showTrafficLight = false
+    @AppStorage("showMemoryIndicator") private var showMemory = false
+    @AppStorage("statusBarShowsWeekly") private var showWeekly = true
+    @AppStorage("statusBarShowCodex") private var showCodexInStatusBar = true
+    @AppStorage("statusBarShowClaude") private var showClaudeInStatusBar = true
+    @AppStorage("statusBarShowMiniMax") private var showMiniMaxInStatusBar = false
     @State private var drafts: [String: String] = [:]
     @State private var copiedField: String?
 
@@ -3376,17 +3930,57 @@ private struct APIKeySettingsView: View {
                 Text("状态栏显示")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
             }
-            Toggle(isOn: Binding(get: { showTrafficLight }, set: { showTrafficLight = $0; applyStatusBarVisibility() })) {
+            statusBarProviderToggle(
+                title: "Codex",
+                detail: "主状态栏显示 Codex 5 小时与每周额度",
+                isOn: $showCodexInStatusBar
+            )
+            statusBarProviderToggle(
+                title: "Claude",
+                detail: "主状态栏显示 Claude 5 小时与每周额度",
+                isOn: $showClaudeInStatusBar
+            )
+            statusBarProviderToggle(
+                title: "MiniMax",
+                detail: "主状态栏显示 MiniMax Token Plan 额度",
+                isOn: $showMiniMaxInStatusBar
+            )
+            Toggle(isOn: Binding(
+                get: { showTrafficLight },
+                set: { value in
+                    showTrafficLight = value
+                    applyStatusBarVisibility()
+                }
+            )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Codex 状态灯").font(.system(size: 13))
                     Text("🟡执行中 · 🟢已完成 · 🔴异常,数据来自 ~/.codex 会话").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
-            Toggle(isOn: Binding(get: { showMemory }, set: { showMemory = $0; applyStatusBarVisibility() })) {
+            Toggle(isOn: Binding(
+                get: { showMemory },
+                set: { value in
+                    showMemory = value
+                    applyStatusBarVisibility()
+                }
+            )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("系统内存").font(.system(size: 13))
                     Text("菜单栏显示内存折线胶囊 + 已用 GB").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            Toggle(isOn: Binding(
+                get: { showWeekly },
+                set: { value in
+                    showWeekly = value
+                    applyStatusBarVisibility()
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("每周进度").font(.system(size: 13))
+                    Text("状态栏图标显示每周额度进度条；关闭后只留 5 小时,更省空间").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
@@ -3395,6 +3989,22 @@ private struct APIKeySettingsView: View {
         .padding(14)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
+    }
+
+    private func statusBarProviderToggle(title: String, detail: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: Binding(
+            get: { isOn.wrappedValue },
+            set: { value in
+                isOn.wrappedValue = value
+                applyStatusBarVisibility()
+            }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13))
+                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
     }
 
     private var header: some View {
@@ -3483,7 +4093,9 @@ private struct CodexAccountEditor: View {
                 if let slot {
                     Toggle("启用", isOn: Binding(
                         get: { slot.isActive },
-                        set: { manager.setSlotActive(slot.slotID, isActive: $0) }
+                        set: { value in
+                            manager.setSlotActive(slot.slotID, isActive: value)
+                        }
                     ))
                     .toggleStyle(.switch)
                     .font(.system(size: 12))
@@ -3628,6 +4240,7 @@ private struct APIKeyProviderEditor: View {
     let refresh: () -> Void
     let copy: (APIKeyField) -> Void
     let setEnabled: (Bool) -> Void
+    @State private var revealedFields: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3638,7 +4251,12 @@ private struct APIKeyProviderEditor: View {
                 Text(provider.displayName)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                 Spacer()
-                Toggle("启用", isOn: Binding(get: { provider.isEnabled }, set: { value in setEnabled(value) }))
+                Toggle("启用", isOn: Binding(
+                    get: { provider.isEnabled },
+                    set: { value in
+                        setEnabled(value)
+                    }
+                ))
                     .toggleStyle(.switch)
                     .font(.system(size: 12))
             }
@@ -3691,18 +4309,27 @@ private struct APIKeyProviderEditor: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 76, alignment: .leading)
-            if field.isSecure {
-                SecureField(field.placeholder, text: Binding(
-                    get: { values[key] ?? "" },
-                    set: { values[key] = $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
+            let textBinding = Binding(
+                get: { values[key] ?? "" },
+                set: { values[key] = $0 }
+            )
+            if field.isSecure && !revealedFields.contains(key) {
+                SecureField(field.placeholder, text: textBinding)
+                    .textFieldStyle(.roundedBorder)
             } else {
-                TextField(field.placeholder, text: Binding(
-                    get: { values[key] ?? "" },
-                    set: { values[key] = $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
+                TextField(field.placeholder, text: textBinding)
+                    .textFieldStyle(.roundedBorder)
+            }
+            if field.isSecure {
+                let revealed = revealedFields.contains(key)
+                Button {
+                    if revealed { revealedFields.remove(key) } else { revealedFields.insert(key) }
+                } label: {
+                    Image(systemName: revealed ? "eye.slash" : "eye")
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help(revealed ? "隐藏 \(field.label)" : "显示 \(field.label) 明文")
             }
             Button {
                 copy(field)

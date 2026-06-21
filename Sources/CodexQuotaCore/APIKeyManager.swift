@@ -98,6 +98,16 @@ public final class APIKeyManager: ObservableObject {
         return min(100, max(0, 100 - used))
     }
 
+    public var claudeSevenDayRemaining: Int? {
+        guard let snapshot = providers.first(where: { $0.id == .claude })?.lastSnapshot,
+              let usedText = snapshot.extras["sevenDayUsed"],
+              let used = Int(usedText.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+            return nil
+        }
+        return min(100, max(0, 100 - used))
+    }
+
     public var claudeFiveHourResetAt: Date? {
         guard let resetText = providers.first(where: { $0.id == .claude })?.lastSnapshot?.extras["fiveHourResetsAt"] else {
             return nil

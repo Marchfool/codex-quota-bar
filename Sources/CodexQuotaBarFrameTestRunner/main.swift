@@ -9,6 +9,11 @@ struct CodexQuotaBarFrameTestRunner {
         initialFrameUsesDefaultSizeNearTopRightWhenNothingIsStored()
         initialFrameRestoresSavedFrame()
         claudeCookieDomainFilterOnlyAllowsClaudeHosts()
+        compactStatusBarTitleUsesShortProviderLabels()
+        compactStatusBarDefaultsHideAuxiliaryIndicatorsAfterMigration()
+        statusBarQuotaProviderDefaultsPreserveCurrentMainDisplay()
+        statusBarQuotaProviderVisibilitySupportsSingleAndMixedProviders()
+        statusBarQuotaProviderVisibilityFallsBackWhenEverythingIsDisabled()
         miniMaxBoostedQuotaDisplayUsesRawRemainingBar()
         try widgetSnapshotLoaderReadsCoreProviderMetrics()
         try widgetSnapshotLoaderHandlesMissingFilesAsStale()
@@ -58,6 +63,69 @@ struct CodexQuotaBarFrameTestRunner {
         expect(ClaudeCookieDomainFilter.isAllowedDomain("console.claude.ai"), "expected Claude subdomain")
         expect(!ClaudeCookieDomainFilter.isAllowedDomain("evilclaude.ai"), "expected suffix lookalike to be rejected")
         expect(!ClaudeCookieDomainFilter.isAllowedDomain("claude.ai.evil.example"), "expected superdomain lookalike to be rejected")
+    }
+
+    private static func compactStatusBarTitleUsesShortProviderLabels() {
+        let title = CompactStatusBarDisplay.title(codexRemaining: 98, claudeRemaining: 64)
+
+        expect(title == "CX 98% · CL 64%", "expected compact status bar title")
+        expect(!title.contains("Codex"), "compact title should not spend menu bar width on full provider names")
+        expect(!title.contains("Claude"), "compact title should not spend menu bar width on full provider names")
+    }
+
+    private static func compactStatusBarDefaultsHideAuxiliaryIndicatorsAfterMigration() {
+        let defaults = isolatedDefaults()
+        defaults.set(true, forKey: CompactStatusBarDefaults.trafficLightKey)
+        defaults.set(true, forKey: CompactStatusBarDefaults.memoryIndicatorKey)
+
+        CompactStatusBarDefaults.applyCompactMigration(defaults: defaults)
+
+        expect(!CompactStatusBarDefaults.isTrafficLightVisible(defaults: defaults), "expected traffic light to be hidden after compact migration")
+        expect(!CompactStatusBarDefaults.isMemoryIndicatorVisible(defaults: defaults), "expected memory indicator to be hidden after compact migration")
+    }
+
+    private static func statusBarQuotaProviderDefaultsPreserveCurrentMainDisplay() {
+        let defaults = isolatedDefaults()
+
+        expect(
+            CompactStatusBarDefaults.visibleQuotaProviders(defaults: defaults) == [.codex, .claude],
+            "expected default status bar provider display to preserve Codex + Claude"
+        )
+        expect(
+            !CompactStatusBarDefaults.isQuotaProviderVisible(.minimax, defaults: defaults),
+            "expected MiniMax to remain opt-in for the main status bar"
+        )
+    }
+
+    private static func statusBarQuotaProviderVisibilitySupportsSingleAndMixedProviders() {
+        let defaults = isolatedDefaults()
+        defaults.set(false, forKey: CompactStatusBarDefaults.showCodexQuotaKey)
+        defaults.set(false, forKey: CompactStatusBarDefaults.showClaudeQuotaKey)
+        defaults.set(true, forKey: CompactStatusBarDefaults.showMiniMaxQuotaKey)
+
+        expect(
+            CompactStatusBarDefaults.visibleQuotaProviders(defaults: defaults) == [.minimax],
+            "expected MiniMax-only status bar display"
+        )
+
+        defaults.set(true, forKey: CompactStatusBarDefaults.showCodexQuotaKey)
+
+        expect(
+            CompactStatusBarDefaults.visibleQuotaProviders(defaults: defaults) == [.codex, .minimax],
+            "expected mixed Codex + MiniMax status bar display"
+        )
+    }
+
+    private static func statusBarQuotaProviderVisibilityFallsBackWhenEverythingIsDisabled() {
+        let defaults = isolatedDefaults()
+        defaults.set(false, forKey: CompactStatusBarDefaults.showCodexQuotaKey)
+        defaults.set(false, forKey: CompactStatusBarDefaults.showClaudeQuotaKey)
+        defaults.set(false, forKey: CompactStatusBarDefaults.showMiniMaxQuotaKey)
+
+        expect(
+            CompactStatusBarDefaults.visibleQuotaProviders(defaults: defaults) == [.codex],
+            "expected empty provider selection to keep the status item usable"
+        )
     }
 
     private static func miniMaxBoostedQuotaDisplayUsesRawRemainingBar() {

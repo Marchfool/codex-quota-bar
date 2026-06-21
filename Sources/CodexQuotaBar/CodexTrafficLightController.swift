@@ -33,11 +33,16 @@ final class CodexTrafficLightController: ObservableObject {
     @Published private(set) var mode: Mode = .idle
     @Published private(set) var detail: String = "无活动任务"
 
+    /// 当 Codex 任务状态(mode)发生变化时回调，供主菜单栏图标重绘其内嵌红绿灯圆点。
+    var onModeChange: (@MainActor () -> Void)?
+
     private var statusItem: NSStatusItem?
     private var timer: Timer?
     private var eventStream: FSEventStreamRef?
     private var statusItemVisible = false
     private var panelVisible = false
+    /// 主菜单栏图标内嵌了红绿灯时，即使自身独立圆点隐藏，也要持续监听。
+    private var embeddedActive = false
     private let scanQueue = DispatchQueue(label: "com.codexquotabar.trafficlight", qos: .utility)
     private var scanScheduled = false
     private var scanInProgress = false
@@ -70,6 +75,12 @@ final class CodexTrafficLightController: ObservableObject {
         updateMonitoringState()
     }
 
+    /// 开启/关闭"主图标内嵌红绿灯"的常驻监听（不显示自身独立圆点）。
+    func setEmbeddedActive(_ active: Bool) {
+        embeddedActive = active
+        updateMonitoringState()
+    }
+
     private func ensureStatusItem() {
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: 26)
@@ -83,7 +94,7 @@ final class CodexTrafficLightController: ObservableObject {
     }
 
     private func updateMonitoringState() {
-        if statusItemVisible || panelVisible {
+        if statusItemVisible || panelVisible || embeddedActive {
             startMonitoring()
         } else {
             stopMonitoring()
@@ -157,11 +168,13 @@ final class CodexTrafficLightController: ObservableObject {
 
     private func apply(_ result: (mode: Mode, detail: String)?) {
         guard let result else { return }
+        let modeChanged = mode != result.mode
         detail = result.detail
         statusItem?.button?.toolTip = "Codex: \(result.mode.label)"
         statusMenuItem.title = "Codex: \(result.mode.label) · \(result.detail)"
         setIcon(mode: result.mode, animated: true)
         mode = result.mode
+        if modeChanged { onModeChange?() }
     }
 
     // MARK: - Icon + pulse animation (ported from CodexTaskMonitor)
